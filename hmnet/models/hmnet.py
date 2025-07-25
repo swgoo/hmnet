@@ -14,8 +14,9 @@ from hnet.modules.dc import (
 )
 
 from ..modules.dm import MaskingModule
-
 from .config_hmnet import HMNetConfig
+
+from hnet.models.hnet import HNet
 
 
 class STE(torch.autograd.Function):
@@ -28,28 +29,34 @@ class STE(torch.autograd.Function):
         grad_x = grad_output
         return grad_x
 
+
 def ste_func(x):
     return STE.apply(x)
 
 
 @dataclass
-class HNetState:
+class HMNetState:
     encoder_state: Optional[IsotropicInferenceParams] = None
     routing_module_state: Optional[RoutingModuleState] = None
-    main_network_state: Optional[Union["HNetState", IsotropicInferenceParams]] = None
+    main_network_state: Optional[Union["HMNetState", IsotropicInferenceParams]] = None
     dechunk_state: Optional[DeChunkState] = None
     decoder_state: Optional[IsotropicInferenceParams] = None
 
 
-class HMNet(nn.Module):
+class HMNet(HNet):
     def __init__(
         self,
         config: HMNetConfig,
-        stage_idx: int,
+        stage_idx: int = 0,
         device=None,
         dtype=None,
     ) -> None:
-        super().__init__()
+        super().__init__(
+            config=config,
+            stage_idx=stage_idx,
+            device=device,
+            dtype=dtype,
+        )
         factory_kwargs = {"device": device, "dtype": dtype}
 
         self.stage_idx = stage_idx
@@ -61,45 +68,45 @@ class HMNet(nn.Module):
 
         assert isinstance(arch_layout, list), f"Wrong arch_layout: {arch_layout}"
         if len(arch_layout) == 3:
-            sub_model_names = ["encoder", "main_network", "decoder"]
             self.is_innermost = False
         elif len(arch_layout) == 1:
-            sub_model_names = ["main_network"]
             self.is_innermost = True
         else:
             raise NotImplementedError
 
-        for _name, _layout in zip(sub_model_names, arch_layout):
-            if self.is_innermost or _name in ("encoder", "decoder"):
-                SubModel = Isotropic
-                _stage_idx = stage_idx
-                _pos_idx = None
-                if _name == "encoder":
-                    _pos_idx = 0
-                elif self.is_innermost:
-                    # if innermost, then len(layer_layout) == 1
-                    _pos_idx = 0
-                elif _name == "decoder":
-                    _pos_idx = 2
-                _pos_idx_dict = {"pos_idx": _pos_idx}
-            else:
-                SubModel = HNet
-                _stage_idx = stage_idx + 1
-                _pos_idx_dict = {}
+        if self.stage_idx != 0:
+            self.masking_module = MaskingModule(self.d_model, **factory_kwargs)
+        else:
+            self.masking_module = None
 
-            _sub_model = SubModel(
+        if self.is_innermost:
+            self.main_network = Isotropic(
                 config=config,
-                stage_idx=_stage_idx,
-                **_pos_idx_dict,
+                stage_idx=stage_idx,
+                pos_idx=1,
                 **factory_kwargs,
             )
-            self.add_module(_name, _sub_model)
-
-        if not self.is_innermost:
+        else:
+            self.encoder = Isotropic(
+                config=config,
+                stage_idx=stage_idx,
+                pos_idx=0,
+                **factory_kwargs,
+            )
+            self.decoder = Isotropic(
+                config=config,
+                stage_idx=stage_idx,
+                pos_idx=2,
+                **factory_kwargs,
+            )
+            self.main_network = HMNet(
+                config=config,
+                stage_idx=stage_idx + 1,
+                **factory_kwargs,
+            )
             self.routing_module = RoutingModule(self.d_model, **factory_kwargs)
             self.chunk_layer = ChunkLayer()
             self.dechunk_layer = DeChunkLayer(self.d_model)
-            self.masking_module = MaskingModule(self.d_model, **factory_kwargs)
 
             # do the residual in fp32
             self.residual_proj = nn.Linear(
@@ -136,14 +143,14 @@ class HMNet(nn.Module):
         It is thus a list of length 5.
         """
         if self.is_innermost:
-            return HNetState(
+            return HMNetState(
                 main_network_state=self.main_network.allocate_inference_cache(
                     batch_size, max_seqlen, dtype=dtype
                 )
             )
         else:
             device = self.residual_proj.weight.device
-            return HNetState(
+            return HMNetState(
                 encoder_state=self.encoder.allocate_inference_cache(
                     batch_size, max_seqlen, dtype=dtype
                 ),
@@ -167,7 +174,7 @@ class HMNet(nn.Module):
         cu_seqlens=None,
         max_seqlen=None,
         mask=None,
-        inference_params=None,
+        inference_params: HMNetState | None = None,
         **mixer_kwargs,
     ):
         assert mask is not None or (
@@ -175,7 +182,7 @@ class HMNet(nn.Module):
         ), "Either mask or cu_seqlens and max_seqlen must be provided"
 
         if inference_params is None:
-            inference_params = HNetState(main_network_state=None)
+            inference_params = HMNetState(main_network_state=None)
         else:
             assert (
                 mask is not None
@@ -199,8 +206,9 @@ class HMNet(nn.Module):
                 **mixer_kwargs,
             )
             # TODO: 낮은 stage의 decoder에 적용할 attention mask를 여기서 연산해서 반환해야 함.
+            mask_prediction = None
             hidden_states = hidden_states[..., :D]
-            return hidden_states, []
+            return hidden_states, [], [mask_prediction]
 
         hidden_states = self.encoder(
             hidden_states,
@@ -226,16 +234,16 @@ class HMNet(nn.Module):
             hidden_states, bpred_output.boundary_mask, cu_seqlens, mask=mask
         )
 
-        hidden_states, prev_boundary_predictions = self.main_network(
-            hidden_states,
-            cu_seqlens=next_cu_seqlens,
-            max_seqlen=next_max_seqlen,
-            mask=next_mask,
-            inference_params=inference_params.main_network_state,
-            **mixer_kwargs,
+        hidden_states, prev_boundary_predictions, prev_mask_predictions = (
+            self.main_network(
+                hidden_states,
+                cu_seqlens=next_cu_seqlens,
+                max_seqlen=next_max_seqlen,
+                mask=next_mask,
+                inference_params=inference_params.main_network_state,
+                **mixer_kwargs,
+            )
         )
-
-        
 
         hidden_states = self.dechunk_layer(
             hidden_states,
@@ -247,7 +255,9 @@ class HMNet(nn.Module):
         )
 
         hidden_states = self.residual_func(
-            hidden_states.to(dtype=residual.dtype), residual, bpred_output.selected_probs
+            hidden_states.to(dtype=residual.dtype),
+            residual,
+            bpred_output.selected_probs,
         ).to(hidden_states.dtype)
 
         hidden_states = self.decoder(
@@ -259,13 +269,17 @@ class HMNet(nn.Module):
             **mixer_kwargs,
         )
         # TODO: 낮은 stage의 decoder에 적용할 attention mask를 여기서 연산해서 반환해야 함.
-
+        mask_prediction = None
 
         hidden_states = hidden_states[..., :D]
-        
-        return hidden_states, [bpred_output, *prev_boundary_predictions]
 
-    def step(self, hidden_states, inference_params):
+        return (
+            hidden_states,
+            [bpred_output, *prev_boundary_predictions],
+            [mask_prediction, *prev_mask_predictions],
+        )
+
+    def step(self, hidden_states, inference_params: HMNetState):
         D = hidden_states.shape[-1]
 
         if self.pad_dimension is not None:
@@ -277,12 +291,16 @@ class HMNet(nn.Module):
                 dim=-1,
             )
 
-        if self.is_innermost:
+        if self.is_innermost and self.masking_module is not None:
             hidden_states = self.main_network.step(
                 hidden_states, inference_params.main_network_state
             )
+            # TODO 여기서도 Masking 구현해야 한다.
+            masking_prediction = self.masking_module(
+                hidden_states, inference_params.main_network_state
+            )
             hidden_states = hidden_states[..., :D]
-            return hidden_states, []
+            return hidden_states, [masking_prediction]
 
         hidden_states = self.encoder.step(hidden_states, inference_params.encoder_state)
         hidden_states_for_residual = hidden_states.to(
@@ -298,11 +316,15 @@ class HMNet(nn.Module):
         )
 
         if hidden_states_inner.shape[0] > 0:
-            hidden_states_inner, prev_boundary_predictions = self.main_network.step(
-                hidden_states_inner, inference_params.main_network_state
+            hidden_states_inner, prev_boundary_predictions, prev_mask_predictions = (
+                self.main_network.step(
+                    hidden_states_inner, inference_params.main_network_state
+                )
             )
+            mask_prediction = None
         else:
             prev_boundary_predictions = []
+            prev_mask_predictions = []
 
         hidden_states = self.dechunk_layer.step(
             hidden_states_inner,
@@ -312,10 +334,24 @@ class HMNet(nn.Module):
         )
 
         hidden_states = self.residual_func(
-            hidden_states.to(dtype=residual.dtype), residual, bpred_output.selected_probs
+            hidden_states.to(dtype=residual.dtype),
+            residual,
+            bpred_output.selected_probs,
         ).to(hidden_states.dtype)
 
         hidden_states = self.decoder.step(hidden_states, inference_params.decoder_state)
+        # TODO: Implement masking step
+
+        if self.masking_module is not None:
+            mask_prediction = self.masking_module(
+                hidden_states, inference_params.decoder_state
+            )
+        else:
+            mask_prediction = []
         hidden_states = hidden_states[..., :D]
 
-        return hidden_states, [bpred_output, *prev_boundary_predictions]
+        return (
+            hidden_states,
+            [bpred_output, *prev_boundary_predictions],
+            [mask_prediction, *prev_mask_predictions],
+        )

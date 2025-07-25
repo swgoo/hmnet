@@ -5,12 +5,12 @@ import argparse
 import sys
 from omegaconf import ListConfig
 
-from hmnet.models.mixer_seq import HNetForCausalLM
+from hmnet.models.mixer_seq import HMNetForCausalLM
 from hnet.models.config_hnet import (
     AttnConfig,
     SSMConfig,
-    HNetConfig,
 )
+from hmnet.models.config_hmnet import HMNetConfig
 
 
 class ByteTokenizer:
@@ -59,11 +59,11 @@ def load_from_pretrained(model_path: str, model_config_path: str):
     # Create config objects
     attn_cfg = AttnConfig(**config.pop("attn_cfg"))
     ssm_cfg = SSMConfig(**config.pop("ssm_cfg"))
-    hnet_cfg = HNetConfig(**config, attn_cfg=attn_cfg, ssm_cfg=ssm_cfg)
+    hnet_cfg = HMNetConfig(**config, attn_cfg=attn_cfg, ssm_cfg=ssm_cfg)
 
     # Create model
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = HNetForCausalLM(hnet_cfg, device=device, dtype=torch.bfloat16)
+    model = HMNetForCausalLM(hnet_cfg, device=device, dtype=torch.bfloat16)
     model.eval()
 
     # Load checkpoint
@@ -79,7 +79,7 @@ def load_from_pretrained(model_path: str, model_config_path: str):
 
 
 def generate(
-    model,
+    model : HMNetForCausalLM,
     prompt: str,
     max_tokens: int = 1024,
     temperature: float = 1.0,

@@ -13,8 +13,9 @@ from flash_attn import (
 )
 
 from torch.nn.attention.flex_attention import flex_attention, BlockMask
+from hnet.modules.isotropic import IsotropicInferenceParams
 
-from .rotary import RotaryEmbedding
+from hnet.modules.rotary import RotaryEmbedding
 
 
 class FlashCausalSelfAttention(nn.Module):
@@ -93,7 +94,15 @@ class FlexAttention(nn.Module):
         super().__init__()
         self.softmax_scale = softmax_scale
 
-    def forward(self, q: torch.Tensor, kv: torch.Tensor, block_mask=None, score_mod=None, cu_seqlens=None, max_seqlen=None):
+    def forward(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        block_mask=None,
+        score_mod=None,
+        cu_seqlens=None,
+        max_seqlen=None,
+    ):
         """Implements the multihead softmax attention using FlexAttention.
         Arguments
         ---------
@@ -107,7 +116,9 @@ class FlexAttention(nn.Module):
         assert q.dtype in [torch.float16, torch.bfloat16, torch.float32]
         assert kv.dtype in [torch.float16, torch.bfloat16, torch.float32]
         if cu_seqlens is not None or max_seqlen is not None:
-            raise NotImplementedError("Flex attention with variable length sequences is not implemented")
+            raise NotImplementedError(
+                "Flex attention with variable length sequences is not implemented"
+            )
         assert max_seqlen is not None
         assert isinstance(max_seqlen, int)
 
@@ -117,19 +128,22 @@ class FlexAttention(nn.Module):
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
-        
+
         # Apply flex_attention
         out = flex_attention(
-            q, k, v,
+            q,
+            k,
+            v,
             block_mask=block_mask,
             score_mod=score_mod,
-            scale=self.softmax_scale
+            scale=self.softmax_scale,
         )
-        
+
         # Reshape back: (B, S, H, D)
         out = out.transpose(1, 2)
-        
+
         return out
+
 
 class FlashCausalCrossAttention(nn.Module):
     """Implement the scaled dot product attention with softmax.
@@ -528,7 +542,7 @@ class BlockMaskingMHA(nn.Module):
         score_mod=None,
         cu_seqlens=None,
         max_seqlen=None,
-        inference_params=None,
+        inference_params: IsotropicInferenceParams | None = None,
         **kwargs,
     ):
         """
@@ -546,7 +560,7 @@ class BlockMaskingMHA(nn.Module):
             )
         if inference_params is not None:
             assert cu_seqlens is None and max_seqlen is None
-            
+
         kwargs = {"cu_seqlens": cu_seqlens, "max_seqlen": max_seqlen, **kwargs}
         seqlen_offset = (
             0
@@ -565,35 +579,39 @@ class BlockMaskingMHA(nn.Module):
         qkv = rearrange(
             qkv, "... (three h d) -> ... three h d", three=3, d=self.head_dim
         )
-        
+
         # Apply rotary embeddings if configured
         if self.rotary_emb_dim > 0:
-            qkv = self.rotary_emb(qkv, seqlen_offset=seqlen_offset, max_seqlen=rotary_max_seqlen)
-        
+            qkv = self.rotary_emb(
+                qkv, seqlen_offset=seqlen_offset, max_seqlen=rotary_max_seqlen
+            )
+
         # Split qkv into query and key-value
         q, kv = qkv[:, :, 0], qkv[:, :, 1:]
-        
+
         if inference_params is None:
             # Regular forward pass during training
-            context = self.inner_attn(q, kv, block_mask=block_mask, score_mod=score_mod, **kwargs)
+            context = self.inner_attn(
+                q, kv, block_mask=block_mask, score_mod=score_mod, **kwargs
+            )
         else:
             # Inference mode with KV caching
             if self.layer_idx is None:
                 raise ValueError("Generation requires layer_idx in the constructor")
-            
+
             # Update KV cache
             kv_cache = self._update_kv_cache(kv, inference_params)
-            
+
             # Get the current batch size
             batch = q.shape[0]
-            
+
             # Get sequence length information for the current batch
             cache_seqlens = (
                 inference_params.lengths_per_sample[:batch]
                 if inference_params.lengths_per_sample is not None
                 else inference_params.seqlen_offset
             )
-            
+
             # Use the cached KV values for attention
             context = self.inner_attn(
                 q,
@@ -601,13 +619,18 @@ class BlockMaskingMHA(nn.Module):
                 block_mask=block_mask,
                 score_mod=score_mod,
                 cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen
+                max_seqlen=max_seqlen,
             )
-        
+
         # Project output
         out = self.out_proj(rearrange(context, "... h d -> ... (h d)"))
         return out
 
     def step(self, x, inference_params, block_mask=None, score_mod=None):
         """Simplified forward for step-by-step generation"""
-        return self.forward(x, block_mask=block_mask, score_mod=score_mod, inference_params=inference_params)
+        return self.forward(
+            x,
+            block_mask=block_mask,
+            score_mod=score_mod,
+            inference_params=inference_params,
+        )
