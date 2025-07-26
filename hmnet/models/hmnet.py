@@ -1,3 +1,4 @@
+from copy import copy
 from dataclasses import dataclass
 from typing import Union, Optional
 
@@ -13,7 +14,12 @@ from hnet.modules.dc import (
     DeChunkState,
 )
 
-from ..modules.dm import MaskingModule, MaskingModuleState
+from ..modules.dm import (
+    CausalBlockMask,
+    MaskingModule,
+    MaskingModuleState,
+    CausalBlockMaskState,
+)
 from .config_hmnet import HMNetConfig
 
 from hnet.models.hnet import HNet
@@ -42,6 +48,7 @@ class HMNetState:
     dechunk_state: Optional[DeChunkState] = None
     decoder_state: Optional[IsotropicInferenceParams] = None
     masking_state: Optional[MaskingModuleState] = None
+    causal_block_mask_state: Optional[CausalBlockMaskState] = None
 
 
 class HMNet(HNet):
@@ -75,11 +82,6 @@ class HMNet(HNet):
         else:
             raise NotImplementedError
 
-        if self.stage_idx > 0:
-            self.masking_module = MaskingModule(self.d_model, **factory_kwargs)
-        else:
-            self.masking_module = None
-
         if self.is_innermost:
             self.main_network = Isotropic(
                 config=config,
@@ -108,6 +110,8 @@ class HMNet(HNet):
             self.routing_module = RoutingModule(self.d_model, **factory_kwargs)
             self.chunk_layer = ChunkLayer()
             self.dechunk_layer = DeChunkLayer(self.d_model)
+            self.causal_block_mask = CausalBlockMask()
+            self.masking_module = MaskingModule(self.d_model, **factory_kwargs)
 
             # do the residual in fp32
             self.residual_proj = nn.Linear(
@@ -167,10 +171,12 @@ class HMNet(HNet):
                 decoder_state=self.decoder.allocate_inference_cache(
                     batch_size, max_seqlen, dtype=dtype
                 ),
-            )
-        if self.masking_module is not None:
-            hmnet_state.masking_state = self.masking_module.allocate_inference_cache(
-                batch_size, max_seqlen, device, dtype=dtype
+                masking_state=self.masking_module.allocate_inference_cache(
+                    batch_size, max_seqlen, device, dtype=dtype
+                ),
+                causal_block_mask_state=self.causal_block_mask.allocate_inference_cache(
+                    batch_size, max_seqlen, device, dtype=dtype
+                ),
             )
         return hmnet_state
 
@@ -211,13 +217,8 @@ class HMNet(HNet):
                 inference_params=inference_params.main_network_state,
                 **mixer_kwargs,
             )
-            mask_prediction = (
-                self.masking_module(hidden_states, inference_params.masking_state)
-                if self.masking_module is not None
-                else []
-            )
             hidden_states = hidden_states[..., :D]
-            return hidden_states, [], [mask_prediction]
+            return hidden_states, [], []
 
         hidden_states = self.encoder(
             hidden_states,
@@ -254,6 +255,10 @@ class HMNet(HNet):
             )
         )
 
+        mask_prediction = self.masking_module(
+            hidden_states, inference_params.masking_state
+        )
+
         hidden_states = self.dechunk_layer(
             hidden_states,
             bpred_output.boundary_mask,
@@ -269,19 +274,24 @@ class HMNet(HNet):
             bpred_output.selected_probs,
         ).to(hidden_states.dtype)
 
-        # TODO use prev_mask_predictions and block_mask and score_mod
+        block_mask, score_mod = self.causal_block_mask(
+            boundary_mask=bpred_output.boundary_mask,
+            block_score=mask_prediction,
+        )
+        mixer_kwargs_for_decoder = copy.deepcopy(mixer_kwargs)
+        mixer_kwargs_for_decoder.update(
+            {
+                "block_mask": block_mask,
+                "score_mod": score_mod,
+            }
+        )
         hidden_states = self.decoder(
             hidden_states,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             mask=mask,
             inference_params=inference_params.decoder_state,
-            **mixer_kwargs,
-        )
-        mask_prediction = (
-            self.masking_module(hidden_states, inference_params.masking_state)
-            if self.masking_module is not None
-            else []
+            **mixer_kwargs_for_decoder,
         )
 
         hidden_states = hidden_states[..., :D]
@@ -292,7 +302,7 @@ class HMNet(HNet):
             [mask_prediction, *prev_mask_predictions],
         )
 
-    def step(self, hidden_states, inference_params: HMNetState):
+    def step(self, hidden_states: torch.Tensor, inference_params: HMNetState):
         D = hidden_states.shape[-1]
 
         if self.pad_dimension is not None:
@@ -304,15 +314,12 @@ class HMNet(HNet):
                 dim=-1,
             )
 
-        if self.is_innermost and self.masking_module is not None:
+        if self.is_innermost:
             hidden_states = self.main_network.step(
                 hidden_states, inference_params.main_network_state
             )
-            masking_prediction = self.masking_module.step(
-                hidden_states, inference_params.masking_state
-            )
             hidden_states = hidden_states[..., :D]
-            return hidden_states, [masking_prediction]
+            return hidden_states, [], []
 
         hidden_states = self.encoder.step(hidden_states, inference_params.encoder_state)
         hidden_states_for_residual = hidden_states.to(
@@ -337,6 +344,10 @@ class HMNet(HNet):
             prev_boundary_predictions = []
             prev_mask_predictions = []
 
+        mask_prediction = self.masking_module.step(
+            hidden_states_inner, inference_params.masking_state
+        )
+
         hidden_states = self.dechunk_layer.step(
             hidden_states_inner,
             bpred_output.boundary_mask,
@@ -349,15 +360,18 @@ class HMNet(HNet):
             residual,
             bpred_output.selected_probs,
         ).to(hidden_states.dtype)
-        # TODO use prev_mask_predictions and block_mask and score_mod
-        hidden_states = self.decoder.step(hidden_states, inference_params.decoder_state)
+        block_mask, score_mod = self.causal_block_mask.step(
+            boundary_mask=bpred_output.boundary_mask,
+            block_score=mask_prediction,
+            inference_params=inference_params.causal_block_mask_state,
+        )
+        hidden_states = self.decoder.step(
+            hidden_states,
+            inference_params.decoder_state,
+            block_mask=block_mask,
+            score_mod=score_mod,
+        )
 
-        if self.masking_module is not None:
-            mask_prediction = self.masking_module.step(
-                hidden_states, inference_params.masking_state
-            )
-        else:
-            mask_prediction = []
         hidden_states = hidden_states[..., :D]
 
         return (

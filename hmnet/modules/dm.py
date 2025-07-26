@@ -1,5 +1,6 @@
 from re import I
 import select
+from turtle import st
 from einops import rearrange
 from hypothesis import infer
 from torch import nn
@@ -128,190 +129,202 @@ class MaskingModule(nn.Module):
         return attn_score
 
 
-def calculate_chunk_boundaries_from_mask(boundary_mask, device=None):
+@dataclass
+class CausalBlockMaskState:
     """
-    boundary_mask에서 청크 경계를 계산
-    boundary_mask: [seq_len] 텐서, 1이면 경계 (직전 0들과 같은 청크)
+    The state of the causal block mask.
+
+    Contains
+        - [last_value] (batch_size, seqlen) tensor. The last value of the batch element
     """
-    if device is None:
-        device = (
-            boundary_mask.device
-            if hasattr(boundary_mask, "device")
-            else torch.device("cpu")
-        )
 
-    boundary_mask = torch.tensor(boundary_mask, device=device, dtype=torch.bool)
-    seq_len = len(boundary_mask)
-
-    # 청크 경계 위치 찾기 (1인 위치들)
-    boundary_positions = torch.where(boundary_mask)[0]
-
-    # 청크 시작 위치들 계산
-    chunk_starts = [0]  # 첫 번째 청크는 항상 0에서 시작
-    if len(boundary_positions) > 0:
-        # 경계 다음 위치들이 새로운 청크의 시작
-        chunk_starts.extend((boundary_positions + 1).tolist())
-
-    # 청크 끝 위치들 계산
-    chunk_ends = boundary_positions.tolist() + [seq_len - 1]
-
-    # 청크 길이들 계산
-    chunk_lengths = []
-    for i in range(len(chunk_starts)):
-        if i < len(chunk_ends):
-            chunk_lengths.append(chunk_ends[i] - chunk_starts[i] + 1)
-
-    # 청크 경계들 (cumsum)
-    chunk_boundaries = [0] + [
-        sum(chunk_lengths[: i + 1]) for i in range(len(chunk_lengths))
-    ]
-
-    return (
-        torch.tensor(chunk_boundaries, device=device, dtype=torch.long),
-        chunk_lengths,
-    )
+    last_value: torch.Tensor  # (batch_size, seqlen)
 
 
 class CausalBlockMask(nn.Module):
 
-    def __init__(self, device=None, dtype=None):
+    def __init__(self, threshold=0.5):
         super().__init__()
+        self.threshold = threshold
 
-    def forward(self, seq_len, boundary_mask, block_score, threshold=0.5):
-        block_mask = self.create_chunked_causal_block_mask(
-            seq_len=seq_len,
-            boundary_mask=boundary_mask,
-            block_score=block_score,
-            threshold=threshold,
-            device=block_score.device,
+    def allocate_inference_cache(self, batch_size, max_seqlen, device, dtype=None):
+        return CausalBlockMaskState(
+            last_value=torch.zeros(batch_size, max_seqlen, device=device, dtype=dtype),
         )
-        score_mod = self.create_chunked_score_mod(
-            boundary_mask=boundary_mask,
-            block_score=block_score,
-            device=block_score.device,
-        )
-        return block_mask, score_mod
 
-    def create_chunked_causal_block_mask(
+    def forward(
         self,
-        seq_len: int,
-        boundary_mask: list,
-        block_score: torch.Tensor,
-        threshold: float = 0.5,
-        device: torch.device = None,
+        boundary_mask,
+        block_score,
+        cu_seqlens=None,
+        mask=None,
+        inference_params: CausalBlockMaskState | None = None,
     ):
         """
-        청킹된 시퀀스를 위한 causal block mask 생성 (확률 기반)
-        boundary_mask: [seq_len] 리스트/텐서, 1이면 경계 (직전 0들과 같은 청크)
-        block_score: [num_chunks, num_chunks] 확률 텐서
-        threshold: 블록 허용 임계값 (기본 0.5)
+        boundary_mask: [batch, seq_len] tensor, 1 if boundary (same chunk
+        with next 0s), idx = 0 is always 1
+        block_score: [batch, num_query_chunks, num_key_chunks] tensor of probabilities
+        cu_seqlens: [batch,] tensor of cumulative sequence lengths
+        mask: [batch, seq_len] tensor, True if token is valid
+        inference_params: CausalBlockMaskState, state of the causal block mask
         """
-        if device is None:
-            device = torch.device("cpu")
 
-        # boundary_mask에서 청크 경계 계산
-        chunk_boundaries, chunk_lengths = calculate_chunk_boundaries_from_mask(
-            boundary_mask, device
+        if inference_params is None:
+            assert (
+                mask is not None
+            ), "Mask must be provided if inference_params is not provided"
+            assert boundary_mask[
+                :, 0
+            ].all(), "First token must be a boundary if running prefill"
+
+        if cu_seqlens is not None:
+            raise NotImplementedError(
+                "CausalBlockMask does not support cu_seqlens yet. Please use mask instead."
+            )
+
+        plug_back_idx = torch.cumsum(boundary_mask, dim=1) - 1  # (B, L)
+        if block_score.size(1) == 1:
+            # Inference mode: block_score shape is [B, 1, num_key_chunks]
+            # Gather along dim=2 to map key indices
+            block_mask_score = torch.gather(
+                block_score,
+                dim=2,
+                index=plug_back_idx.unsqueeze(1).expand(-1, 1, plug_back_idx.size(1)),
+            )
+        else:
+            # Prefill mode: block_score shape is [B, num_query_chunks, num_key_chunks]
+            # First gather along query dimension using plug_back_idx
+            tmp = torch.gather(
+                block_score,
+                dim=1,
+                index=plug_back_idx.unsqueeze(-1).expand(
+                    -1, plug_back_idx.size(1), block_score.size(2)
+                ),
+            )
+            # Then gather along key dimension using plug_back_idx
+            block_mask_score = torch.gather(
+                tmp,
+                dim=2,
+                index=plug_back_idx.unsqueeze(1).expand(
+                    -1, tmp.size(1), plug_back_idx.size(1)
+                ),
+            )
+
+        block_mask = self.create_chunked_causal_block_mask(
+            block_score=block_mask_score,
+        )
+        score_mod = self.create_score_mod(block_score=block_mask_score)
+
+        if inference_params is not None:
+            inference_params.last_value.copy_(block_mask_score[:, -1, :])
+
+        return block_mask, score_mod
+
+    def step(self, boundary_mask, block_score, inference_params: CausalBlockMaskState):
+        """
+        boundary_mask: [batch,] boolean tensor
+        block_score: [batch, 1, num_key_chunks] 확률 텐서
+        inference_params: CausalBlockMaskState, 캐싱된 상태
+
+        Returns:
+            block_mask, score_mod: flex_attention에 사용될 마스크와 스코어 수정 함수
+        """
+        # 새로운 토큰이 들어왔을 때 처리
+        B = boundary_mask.shape[0]
+        # B_selected = block_score.shape[0]
+
+        seq_len = inference_params.last_value.shape[-1]
+
+        # 현재 토큰에 대한 block_mask_score 생성
+        current_token_score = torch.zeros(
+            B, 1, seq_len + 1, device=block_score.device, dtype=block_score.dtype
         )
 
-        # block_score를 텐서로 변환하고 임계값으로 이진화
-        block_selection_tensor = (block_score > threshold).to(device)
+        # 기존 스코어 복사
+        current_token_score[:, :, :seq_len] = inference_params.last_value.unsqueeze(1)
+        # 현재 토큰의 마지막 값은 이전 값의 마지막 값과 동일하게 설정
+        current_token_score[:, :, -1] = inference_params.last_value[:, -1]
 
-        num_chunks = len(chunk_lengths)
+        # boundary_mask가 True인 경우에만 block_score를 업데이트
+        current_token_score[boundary_mask] = block_score[boundary_mask]
 
-        def causal_chunked_mask(b, h, q_idx, kv_idx):
-            """
-            텐서 연산으로만 구성된 마스크 함수 (조건문 없음)
-            """
-            # causal mask: kv_idx <= q_idx 조건
-            causal_condition = kv_idx <= q_idx
+        # 마지막 값 업데이트
+        inference_params.last_value = current_token_score.squeeze(1)
 
-            # 각 위치가 어느 청크에 속하는지 계산
-            q_expanded = q_idx.expand(num_chunks)
-            kv_expanded = kv_idx.expand(num_chunks)
+        # block_mask와 score_mod 생성
+        block_mask = self.create_chunked_causal_block_mask(
+            block_score=current_token_score,
+        )
+        score_mod = self.create_score_mod(block_score=current_token_score)
 
-            # 청크 경계 비교
-            q_ge_start = q_expanded >= chunk_boundaries[:-1]  # [num_chunks]
-            q_lt_end = q_expanded < chunk_boundaries[1:]  # [num_chunks]
-            q_in_chunk = q_ge_start & q_lt_end  # [num_chunks]
+        return block_mask, score_mod
 
-            kv_ge_start = kv_expanded >= chunk_boundaries[:-1]  # [num_chunks]
-            kv_lt_end = kv_expanded < chunk_boundaries[1:]  # [num_chunks]
-            kv_in_chunk = kv_ge_start & kv_lt_end  # [num_chunks]
+    def create_chunked_causal_block_mask(self, block_score):
+        """
+        Create a block mask for flex_attention based on block_score and threshold.
 
-            # 청크 조합별 허용 여부 계산 (확률 > threshold)
-            chunk_pairs = q_in_chunk.unsqueeze(1) & kv_in_chunk.unsqueeze(
-                0
-            )  # [num_chunks, num_chunks]
-            allowed_pairs = (
-                chunk_pairs & block_selection_tensor
-            )  # [num_chunks, num_chunks]
-            chunk_allowed = torch.any(allowed_pairs)
+        Args:
+            block_score: [batch, seq_len, seq_len] tensor of probabilities
 
-            # 최종 마스크: causal 조건 AND 청크 허용 조건
-            return causal_condition & chunk_allowed
+        Returns:
+            block_mask: BlockMask for flex_attention
+        """
+        # Apply threshold to create binary mask
+        binary_mask = (block_score > self.threshold).float()
 
-        # create_block_mask 사용
+        # Apply causal mask (lower triangular)
+        batch_size, seq_len, _ = binary_mask.shape
+        causal_mask = torch.tril(
+            torch.ones(seq_len, seq_len, device=binary_mask.device)
+        )
+
+        # Combine with causal constraint
+        final_mask = binary_mask * causal_mask.unsqueeze(0)
+
+        # Create block mask for flex_attention
+        # flex_attention expects a function that returns True for positions to attend to
+        def mask_fn(b, h, q_idx, kv_idx):
+            return final_mask[b, q_idx, kv_idx] > 0
+
         block_mask = create_block_mask(
-            causal_chunked_mask,
-            B=None,
-            H=None,
-            Q_LEN=seq_len,
-            KV_LEN=seq_len,
-            device=device,
+            mask_fn, B=batch_size, H=1, Q_LEN=seq_len, KV_LEN=seq_len
         )
 
         return block_mask
 
-    def create_chunked_score_mod(
-        self,
-        boundary_mask: list,
-        block_score: torch.Tensor,
-        device: torch.device = None,
-    ):
+    def create_score_mod(self, block_score):
         """
-        청킹된 시퀀스를 위한 score_mod 함수 생성
-        boundary_mask: [seq_len] 리스트/텐서, 1이면 경계 (직전 0들과 같은 청크)
-        block_score: [num_chunks, num_chunks] 확률 텐서
+        Create a score modification function for flex_attention.
+
+        Args:
+            block_score: [batch, seq_len, seq_len] tensor of probabilities
+
+        Returns:
+            score_mod: Function for flex_attention score modification
         """
-        if device is None:
-            device = torch.device("cpu")
 
-        # boundary_mask에서 청크 경계 계산
-        chunk_boundaries, chunk_lengths = calculate_chunk_boundaries_from_mask(
-            boundary_mask, device
-        )
+        def score_mod(score, b, h, q_idx, kv_idx):
+            # Get the block score for this position
+            block_weight = block_score[b, q_idx, kv_idx]
+            # Multiply the attention score by the block score
+            block_weight = (
+                block_weight if block_weight > self.threshold else 1 - block_weight
+            )
+            return score * ste_func(block_weight)
 
-        # block_score를 텐서로 변환
-        block_score_tensor = block_score.to(device)
+        return score_mod
 
-        num_chunks = len(chunk_lengths)
 
-        def chunked_score_mod(score, b, h, q_idx, kv_idx):
-            """
-            청크별 확률을 적용하는 score_mod 함수
-            """
-            # 각 위치가 어느 청크에 속하는지 계산
-            q_expanded = q_idx.expand(num_chunks)
-            kv_expanded = kv_idx.expand(num_chunks)
+class STE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        return torch.ones_like(x)
 
-            # 청크 경계 비교
-            q_ge_start = q_expanded >= chunk_boundaries[:-1]  # [num_chunks]
-            q_lt_end = q_expanded < chunk_boundaries[1:]  # [num_chunks]
-            q_in_chunk = q_ge_start & q_lt_end  # [num_chunks]
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_x = grad_output
+        return grad_x
 
-            kv_ge_start = kv_expanded >= chunk_boundaries[:-1]  # [num_chunks]
-            kv_lt_end = kv_expanded < chunk_boundaries[1:]  # [num_chunks]
-            kv_in_chunk = kv_ge_start & kv_lt_end  # [num_chunks]
 
-            # 해당하는 청크 조합의 확률값 찾기
-            q_chunk_idx = torch.argmax(q_in_chunk.float())
-            kv_chunk_idx = torch.argmax(kv_in_chunk.float())
-
-            # 해당 청크 조합의 확률값 가져오기
-            prob_score = block_score_tensor[q_chunk_idx, kv_chunk_idx]
-
-            # 원래 점수에 확률을 곱해서 반환
-            return score * prob_score
-
-        return chunked_score_mod
+def ste_func(x):
+    return STE.apply(x)
