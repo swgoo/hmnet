@@ -5,7 +5,7 @@ import argparse
 import sys
 from omegaconf import ListConfig
 
-from hmnet.models.mixer_seq import HMNetForCausalLM
+from hnet.models.mixer_seq import HNetForCausalLM
 from hnet.models.config_hnet import (
     AttnConfig,
     SSMConfig,
@@ -63,11 +63,11 @@ def load_from_pretrained(model_path: str, model_config_path: str):
 
     # Create model
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = HMNetForCausalLM(hnet_cfg, device=device, dtype=torch.bfloat16)
+    model = HNetForCausalLM(hnet_cfg, device=device, dtype=torch.bfloat16)
     model.eval()
 
     # Load checkpoint
-    major, minor = map(int, torch.__version__.split('.')[:2])
+    major, minor = map(int, torch.__version__.split(".")[:2])
     if (major, minor) >= (2, 6):
         with torch.serialization.safe_globals([ListConfig]):
             state_dict = torch.load(model_path, map_location=device, weights_only=False)
@@ -79,7 +79,7 @@ def load_from_pretrained(model_path: str, model_config_path: str):
 
 
 def generate(
-    model : HMNetForCausalLM,
+    model: HNetForCausalLM,
     prompt: str,
     max_tokens: int = 1024,
     temperature: float = 1.0,

@@ -229,7 +229,7 @@ class LinearResidual(nn.Linear):
         return super().forward(input), input
 
 
-def _update_kv_cache(kv, inference_params, layer_idx):
+def _update_kv_cache(kv, inference_params: IsotropicInferenceParams, layer_idx):
     """kv: (batch_size, seqlen, 2, nheads, head_dim) or (batch_size, 1, 2, nheads, head_dim)"""
     # Pre-allocate memory for key-values for inference.
     num_heads, head_dim = kv.shape[-2:]
@@ -580,7 +580,6 @@ class BlockMaskingMHA(nn.Module):
             qkv, "... (three h d) -> ... three h d", three=3, d=self.head_dim
         )
 
-        # Apply rotary embeddings if configured
         if self.rotary_emb_dim > 0:
             qkv = self.rotary_emb(
                 qkv, seqlen_offset=seqlen_offset, max_seqlen=rotary_max_seqlen
@@ -590,29 +589,11 @@ class BlockMaskingMHA(nn.Module):
         q, kv = qkv[:, :, 0], qkv[:, :, 1:]
 
         if inference_params is None:
-            # Regular forward pass during training
             context = self.inner_attn(
                 q, kv, block_mask=block_mask, score_mod=score_mod, **kwargs
             )
         else:
-            # Inference mode with KV caching
-            if self.layer_idx is None:
-                raise ValueError("Generation requires layer_idx in the constructor")
-
-            # Update KV cache
             kv_cache = self._update_kv_cache(kv, inference_params)
-
-            # Get the current batch size
-            batch = q.shape[0]
-
-            # Get sequence length information for the current batch
-            cache_seqlens = (
-                inference_params.lengths_per_sample[:batch]
-                if inference_params.lengths_per_sample is not None
-                else inference_params.seqlen_offset
-            )
-
-            # Use the cached KV values for attention
             context = self.inner_attn(
                 q,
                 kv_cache,
@@ -622,7 +603,6 @@ class BlockMaskingMHA(nn.Module):
                 max_seqlen=max_seqlen,
             )
 
-        # Project output
         out = self.out_proj(rearrange(context, "... h d -> ... (h d)"))
         return out
 
