@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
 from einops import rearrange
-from torch.nn.attention.flex_attention import create_block_mask, flex_attention
-
-from ..modules.isotropic import IsotropicInferenceParams
+from hnet.modules.isotropic import IsotropicInferenceParams
+from hnet.modules.mha import _update_kv_cache
 from hnet.modules.rotary import RotaryEmbedding
+from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 
 class FlexAttention(nn.Module):
@@ -48,8 +48,6 @@ class FlexAttention(nn.Module):
             raise NotImplementedError(
                 "Flex attention with variable length sequences is not implemented"
             )
-        assert max_seqlen is not None
-        assert isinstance(max_seqlen, int)
 
         k, v = kv.unbind(dim=2)  # Each: (B, S, H, D)
 
@@ -81,40 +79,11 @@ class LinearResidual(nn.Linear):
         return super().forward(input), input
 
 
-def _update_kv_cache(kv, inference_params: IsotropicInferenceParams, layer_idx):
-    """kv: (batch_size, seqlen, 2, nheads, head_dim) or (batch_size, 1, 2, nheads, head_dim)"""
-    # Pre-allocate memory for key-values for inference.
-    num_heads, head_dim = kv.shape[-2:]
-    if layer_idx not in inference_params.key_value_memory_dict:
-        kv_cache = torch.empty(
-            inference_params.max_batch_size,
-            inference_params.max_seqlen,
-            2,
-            num_heads,
-            head_dim,
-            dtype=kv.dtype,
-            device=kv.device,
-        )
-        inference_params.key_value_memory_dict[layer_idx] = kv_cache
-    else:
-        kv_cache = inference_params.key_value_memory_dict[layer_idx]
-    # Adjust key and value for inference
-    batch_start = inference_params.batch_size_offset
-    batch_end = batch_start + kv.shape[0]
-    sequence_start = inference_params.seqlen_offset
-    sequence_end = sequence_start + kv.shape[1]
-    assert batch_end <= kv_cache.shape[0]
-    assert sequence_end <= kv_cache.shape[1]
-    assert kv_cache is not None
-    kv_cache[batch_start:batch_end, sequence_start:sequence_end, ...] = kv
-    return kv_cache[batch_start:batch_end, :sequence_end, ...]
-
-
 def causal_mask_fn(b, h, q_idx, kv_idx):
     return q_idx >= kv_idx
 
 
-class BlockMaskingMHA(nn.Module):
+class CausalBlockMaskMHA(nn.Module):
     def __init__(
         self,
         d_model,
@@ -254,8 +223,7 @@ class BlockMaskingMHA(nn.Module):
         out = self.out_proj(rearrange(context, "... h d -> ... (h d)"))
         return out
 
-    def step(self, x, inference_params, block_mask=None, score_mod=None):
-        """Simplified forward for step-by-step generation"""
+    def step(self, x, inference_params, block_mask=None, score_mod=None, **kwargs):
         return self.forward(
             x,
             block_mask=block_mask,

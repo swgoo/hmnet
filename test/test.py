@@ -20,9 +20,9 @@ def test_attn_score():
     block_score = torch.tensor(
         [[[0.1, 0.2]], [[0.4, 0.5]]], dtype=torch.float32
     )  # (B, num_query_chunks, num_key_chunks)
-    block_score = torch.tensor(
-        [[[0.1, 0.2], [0.3, 0.4]], [[0.4, 0.5], [0.6, 0.7]]], dtype=torch.float32
-    )  # (B, num_query_chunks, num_key_chunks)
+    # block_score = torch.tensor(
+    #     [[[0.1, 0.2], [0.3, 0.4]], [[0.4, 0.5], [0.6, 0.7]]], dtype=torch.float32
+    # )  # (B, num_query_chunks, num_key_chunks)
     plug_back_idx = torch.cumsum(boundary_mask, dim=1) - 1  # (B, L)
     # block_mask_score: (B, L, L) or (B, 1, L)?
     if block_score.size(1) == 1:
@@ -53,3 +53,11 @@ def test_attn_score():
             ),
         )
         assert block_mask_score.shape == (2, 4, 4)  # (B, L, L)
+
+
+def test_ckpt_loading():
+    import torch
+
+    ckpt = torch.load("../ckpts/hnet_2stage_XL.pt", map_location="cpu")
+    for k, v in ckpt.items():
+        print(k, v.shape)

@@ -1,1 +1,2 @@
 git+https://github.com/goombalab/hnet.git
+pytest

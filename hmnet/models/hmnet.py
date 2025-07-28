@@ -1,43 +1,27 @@
 from copy import copy
 from dataclasses import dataclass
-from typing import Union, Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-
-from hnet.modules.isotropic import Isotropic, IsotropicInferenceParams
+from hnet.models.config_hnet import HNetConfig
 from hnet.modules.dc import (
-    RoutingModule,
     ChunkLayer,
     DeChunkLayer,
-    RoutingModuleState,
     DeChunkState,
+    RoutingModule,
+    RoutingModuleState,
 )
+from hnet.modules.isotropic import IsotropicInferenceParams
 
 from ..modules.dm import (
     CausalBlockMask,
+    CausalBlockMaskState,
     MaskingModule,
     MaskingModuleState,
-    CausalBlockMaskState,
 )
-from .config_hmnet import HMNetConfig
-
-from hnet.models.hnet import HNet
-
-
-class STE(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x):
-        return torch.ones_like(x)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        grad_x = grad_output
-        return grad_x
-
-
-def ste_func(x):
-    return STE.apply(x)
+from ..modules.isotropic import Isotropic
+from ..modules.utils import ste_func
 
 
 @dataclass
@@ -51,10 +35,10 @@ class HMNetState:
     causal_block_mask_state: Optional[CausalBlockMaskState] = None
 
 
-class HMNet(HNet):
+class HMNet(nn.Module):
     def __init__(
         self,
-        config: HMNetConfig,
+        config: HNetConfig,
         stage_idx: int = 0,
         device=None,
         dtype=None,
@@ -86,7 +70,7 @@ class HMNet(HNet):
             self.main_network = Isotropic(
                 config=config,
                 stage_idx=stage_idx,
-                pos_idx=1,
+                pos_idx=0,  # Assuming the innermost network is at position 0
                 **factory_kwargs,
             )
         else:

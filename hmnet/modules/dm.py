@@ -9,8 +9,9 @@ import numpy as np
 from dataclasses import dataclass
 
 import torch
-from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+from torch.nn.attention.flex_attention import create_block_mask
 import torch.nn.functional as F
+from .utils import ste_func
 
 
 @dataclass
@@ -313,18 +314,3 @@ class CausalBlockMask(nn.Module):
             return score * ste_func(block_weight)
 
         return score_mod
-
-
-class STE(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x):
-        return torch.ones_like(x)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        grad_x = grad_output
-        return grad_x
-
-
-def ste_func(x):
-    return STE.apply(x)

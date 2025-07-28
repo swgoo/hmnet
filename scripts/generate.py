@@ -10,7 +10,7 @@ from hnet.models.config_hnet import (
     AttnConfig,
     SSMConfig,
 )
-from hmnet.models.config_hmnet import HMNetConfig
+from hnet.models.config_hnet import HNetConfig
 
 
 class ByteTokenizer:
