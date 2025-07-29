@@ -90,6 +90,7 @@ class CausalBlockMaskMHA(nn.Module):
         num_heads,
         qkv_proj_bias=False,
         out_proj_bias=False,
+        window_size=-1,
         softmax_scale=None,
         layer_idx=None,
         rotary_emb_dim=0,
@@ -104,6 +105,11 @@ class CausalBlockMaskMHA(nn.Module):
         self.layer_idx = layer_idx
         self.softmax_scale = softmax_scale
         self.rotary_emb_dim = rotary_emb_dim
+        if window_size != -1:
+            print(
+                "Warning: window_size is not used in CausalBlockMaskMHA, "
+                "it is only for compatibility with other MHA implementations."
+            )
 
         self.num_heads = num_heads
         assert self.d_model % num_heads == 0, "d_model must be divisible by num_heads"
