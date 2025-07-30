@@ -72,15 +72,16 @@ class FlexAttention(nn.Module):
         return out
 
 
-class LinearResidual(nn.Linear):
-    """Wrap nn.Linear to return the residual as well. For compatibility with FusedDense."""
+def create_window_causal_mask(window_size):
+    def window_causal_mask_Fn(b, h, q_idx, kv_idx):
+        if window_size == -1:
+            return q_idx >= kv_idx
+        elif window_size >= 0:
+            return 0 <= (q_idx - kv_idx) < window_size
+        else:
+            raise ValueError("window_size must be -1 or >= 0")
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return super().forward(input), input
-
-
-def causal_mask_fn(b, h, q_idx, kv_idx):
-    return q_idx >= kv_idx
+    return window_causal_mask_Fn
 
 
 class CausalBlockMaskMHA(nn.Module):
@@ -105,12 +106,8 @@ class CausalBlockMaskMHA(nn.Module):
         self.layer_idx = layer_idx
         self.softmax_scale = softmax_scale
         self.rotary_emb_dim = rotary_emb_dim
-        if window_size != -1:
-            print(
-                "Warning: window_size is not used in CausalBlockMaskMHA, "
-                "it is only for compatibility with other MHA implementations."
-            )
-
+        assert window_size >= -1, "window_size must be -1 or >= 0"
+        self.window_size = window_size
         self.num_heads = num_heads
         assert self.d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.head_dim = self.d_model // num_heads
@@ -204,7 +201,7 @@ class CausalBlockMaskMHA(nn.Module):
 
         if block_mask is None:
             block_mask = create_block_mask(
-                causal_mask_fn,
+                create_window_causal_mask(self.window_size),
                 B=qkv.shape[0],
                 H=self.num_heads,
                 Q_LEN=qkv.shape[1],

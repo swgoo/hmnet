@@ -144,8 +144,9 @@ class CausalBlockMaskState:
 
 class CausalBlockMask(nn.Module):
 
-    def __init__(self, threshold=0.5):
+    def __init__(self, window_size: int, threshold=0.5):
         super().__init__()
+        self.window_size = window_size
         self.threshold = threshold
 
     def allocate_inference_cache(self, batch_size, max_seqlen, device, dtype=None):
@@ -260,7 +261,7 @@ class CausalBlockMask(nn.Module):
 
         return block_mask, score_mod
 
-    def create_chunked_causal_block_mask(self, block_score):
+    def create_chunked_causal_block_mask(self, block_score, window_size: int = -1):
         """
         Create a block mask for flex_attention based on block_score and threshold.
 
@@ -281,6 +282,13 @@ class CausalBlockMask(nn.Module):
 
         # Combine with causal constraint
         final_mask = binary_mask * causal_mask.unsqueeze(0)
+
+        if window_size >= 0:
+            window_mask = (
+                torch.tril(final_mask).bool()
+                * ~torch.tril(final_mask, diagonal=-window_size).bool()
+            )
+            final_mask = final_mask * window_mask.unsqueeze(0)
 
         # Create block mask for flex_attention
         # flex_attention expects a function that returns True for positions to attend to

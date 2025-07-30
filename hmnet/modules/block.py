@@ -1,7 +1,8 @@
 from functools import partial
 
+import torch
 from flash_attn.ops.triton.layer_norm import RMSNorm
-from hnet.modules.block import Block
+from hnet.modules.block import Block as HNetBlock
 from hnet.modules.mlp import SwiGLU
 from mamba_ssm.modules.mamba2 import Mamba2
 from torch import nn
@@ -86,3 +87,25 @@ def create_block(
         residual_in_fp32=residual_in_fp32,
     )
     return block
+
+
+class Block(HNetBlock):
+
+    def step(self, hidden_states, inference_params, residual=None, **kwargs):
+        hidden_states, residual = self.norm1(
+            hidden_states,
+            residual=residual,
+            prenorm=True,
+            residual_in_fp32=self.residual_in_fp32,
+        )
+        hidden_states = self.mixer.step(hidden_states, inference_params, **kwargs)
+        if self.mlp is not None:
+            hidden_states, residual = self.norm2(
+                hidden_states,
+                residual=residual,
+                prenorm=True,
+                residual_in_fp32=self.residual_in_fp32,
+            )
+            hidden_states = self.mlp(hidden_states)
+
+        return hidden_states, residual

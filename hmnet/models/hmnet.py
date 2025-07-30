@@ -53,6 +53,7 @@ class HMNet(nn.Module):
 
         self.stage_idx = stage_idx
         self.d_model = config.d_model[stage_idx]
+        self.window_size = config.attn_cfg.window_size[stage_idx]
 
         arch_layout = config.arch_layout
         for _ in range(stage_idx):
@@ -94,7 +95,7 @@ class HMNet(nn.Module):
             self.routing_module = RoutingModule(self.d_model, **factory_kwargs)
             self.chunk_layer = ChunkLayer()
             self.dechunk_layer = DeChunkLayer(self.d_model)
-            self.causal_block_mask = CausalBlockMask()
+            self.causal_block_mask = CausalBlockMask(self.window_size)
             self.masking_module = MaskingModule(self.d_model, **factory_kwargs)
 
             # do the residual in fp32

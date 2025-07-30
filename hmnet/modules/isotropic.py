@@ -3,11 +3,8 @@ import re
 import torch.nn as nn
 from flash_attn.ops.triton.layer_norm import RMSNorm
 from hnet.modules.isotropic import Isotropic as HNetIsotropic
-from hnet.modules.isotropic import get_seq_idx, get_stage_cfg
 from hnet.models.config_hnet import HNetConfig
 from .block import create_block
-
-
 
 
 class Isotropic(HNetIsotropic):
@@ -52,3 +49,20 @@ class Isotropic(HNetIsotropic):
         self.layers = nn.ModuleList(layers)
 
         self.rmsnorm = RMSNorm(self.d_model, eps=1e-5, **factory_kwargs)
+
+    def step(self, hidden_states, inference_params, block_mask=None, score_mod=None):
+        """
+        Assumes hidden_states is (B, 1, D). Steps each of the layers in order, and then steps the main model.
+        """
+        residual = None
+        for layer in self.layers:
+            hidden_states, residual = layer.step(
+                hidden_states, inference_params, residual=residual
+            )
+
+        hidden_states = self.rmsnorm(
+            hidden_states, residual=residual, prenorm=False, residual_in_fp32=True
+        )
+        inference_params.seqlen_offset += 1
+
+        return hidden_states
