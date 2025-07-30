@@ -50,14 +50,15 @@ class Isotropic(HNetIsotropic):
 
         self.rmsnorm = RMSNorm(self.d_model, eps=1e-5, **factory_kwargs)
 
-    def step(self, hidden_states, inference_params, block_mask=None, score_mod=None):
+    def step(self, hidden_states, inference_params, **kwargs):
         """
         Assumes hidden_states is (B, 1, D). Steps each of the layers in order, and then steps the main model.
         """
         residual = None
+
         for layer in self.layers:
             hidden_states, residual = layer.step(
-                hidden_states, inference_params, residual=residual
+                hidden_states, inference_params, residual=residual, **kwargs
             )
 
         hidden_states = self.rmsnorm(

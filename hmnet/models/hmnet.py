@@ -1,4 +1,4 @@
-from copy import copy
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -15,8 +15,8 @@ from hnet.modules.dc import (
 from hnet.modules.isotropic import IsotropicInferenceParams
 
 from ..modules.dm import (
-    CausalBlockMask,
-    CausalBlockMaskState,
+    DeChunkMaskLayer,
+    DeChunkMaskState,
     MaskingModule,
     MaskingModuleState,
 )
@@ -32,23 +32,18 @@ class HMNetState:
     dechunk_state: Optional[DeChunkState] = None
     decoder_state: Optional[IsotropicInferenceParams] = None
     masking_state: Optional[MaskingModuleState] = None
-    causal_block_mask_state: Optional[CausalBlockMaskState] = None
+    causal_block_mask_state: Optional[DeChunkMaskState] = None
 
 
 class HMNet(nn.Module):
     def __init__(
         self,
         config: HNetConfig,
-        stage_idx: int = 0,
+        stage_idx: int,
         device=None,
         dtype=None,
     ) -> None:
-        super().__init__(
-            config=config,
-            stage_idx=stage_idx,
-            device=device,
-            dtype=dtype,
-        )
+        super().__init__()
         factory_kwargs = {"device": device, "dtype": dtype}
 
         self.stage_idx = stage_idx
@@ -95,7 +90,7 @@ class HMNet(nn.Module):
             self.routing_module = RoutingModule(self.d_model, **factory_kwargs)
             self.chunk_layer = ChunkLayer()
             self.dechunk_layer = DeChunkLayer(self.d_model)
-            self.causal_block_mask = CausalBlockMask(self.window_size)
+            self.dechunk_mask_layer = DeChunkMaskLayer(self.window_size)
             self.masking_module = MaskingModule(self.d_model, **factory_kwargs)
 
             # do the residual in fp32
@@ -159,7 +154,7 @@ class HMNet(nn.Module):
                 masking_state=self.masking_module.allocate_inference_cache(
                     batch_size, max_seqlen, device, dtype=dtype
                 ),
-                causal_block_mask_state=self.causal_block_mask.allocate_inference_cache(
+                causal_block_mask_state=self.dechunk_mask_layer.allocate_inference_cache(
                     batch_size, max_seqlen, device, dtype=dtype
                 ),
             )
@@ -259,24 +254,20 @@ class HMNet(nn.Module):
             bpred_output.selected_probs,
         ).to(hidden_states.dtype)
 
-        block_mask, score_mod = self.causal_block_mask(
+        masking_score = self.dechunk_mask_layer(
             boundary_mask=bpred_output.boundary_mask,
             block_score=mask_prediction,
+            mask=mask,
         )
-        mixer_kwargs_for_decoder = copy.deepcopy(mixer_kwargs)
-        mixer_kwargs_for_decoder.update(
-            {
-                "block_mask": block_mask,
-                "score_mod": score_mod,
-            }
-        )
+
         hidden_states = self.decoder(
             hidden_states,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             mask=mask,
             inference_params=inference_params.decoder_state,
-            **mixer_kwargs_for_decoder,
+            masking_score=masking_score,
+            **mixer_kwargs,
         )
 
         hidden_states = hidden_states[..., :D]
@@ -345,7 +336,7 @@ class HMNet(nn.Module):
             residual,
             bpred_output.selected_probs,
         ).to(hidden_states.dtype)
-        block_mask, score_mod = self.causal_block_mask.step(
+        masking_score = self.dechunk_mask_layer.step(
             boundary_mask=bpred_output.boundary_mask,
             block_score=mask_prediction,
             inference_params=inference_params.causal_block_mask_state,
@@ -353,8 +344,7 @@ class HMNet(nn.Module):
         hidden_states = self.decoder.step(
             hidden_states,
             inference_params.decoder_state,
-            block_mask=block_mask,
-            score_mod=score_mod,
+            masking_score=masking_score,
         )
 
         hidden_states = hidden_states[..., :D]

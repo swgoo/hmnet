@@ -1,17 +1,11 @@
-from re import I
-import select
-from turtle import st
-from einops import rearrange
-from hypothesis import infer
-from torch import nn
-import torch
-import numpy as np
 from dataclasses import dataclass
+from re import A
 
+import numpy as np
 import torch
-from torch.nn.attention.flex_attention import create_block_mask
 import torch.nn.functional as F
-from .utils import ste_func
+from einops import einsum, rearrange
+from torch import nn
 
 
 @dataclass
@@ -104,8 +98,8 @@ class MaskingModule(nn.Module):
     ):
 
         qk = self.Wqk(hidden_states)
-        q, k = rearrange(qk, "... (two d) -> ... two d", two=2)
-
+        qk = rearrange(qk, "... (two d) -> ... two d", two=2, d=self.d_model)
+        q, k = qk[:, :, 0], qk[:, :, 1]
         if inference_params is None:
             attn_score = self.attention_score(q, k)
         else:
@@ -115,8 +109,10 @@ class MaskingModule(nn.Module):
         return attn_score
 
     def attention_score(self, q, k):
-        attn_score = torch.einsum(
-            "bld,bmd->blm", F.normalize(q, dim=-1), F.normalize(k, dim=-1)
+        attn_score = einsum(
+            F.normalize(q, dim=-1),
+            F.normalize(k, dim=-1),
+            "... l d, ... m d -> ... l m",
         )
         attn_score = torch.softmax(attn_score * self.softmax_scale, dim=-1)
         return attn_score
@@ -131,9 +127,9 @@ class MaskingModule(nn.Module):
 
 
 @dataclass
-class CausalBlockMaskState:
+class DeChunkMaskState:
     """
-    The state of the causal block mask.
+    The state of the dechunk mask.
 
     Contains
         - [last_value] (batch_size, seqlen) tensor. The last value of the batch element
@@ -142,7 +138,7 @@ class CausalBlockMaskState:
     last_value: torch.Tensor  # (batch_size, seqlen)
 
 
-class CausalBlockMask(nn.Module):
+class DeChunkMaskLayer(nn.Module):
 
     def __init__(self, window_size: int, threshold=0.5):
         super().__init__()
@@ -150,7 +146,7 @@ class CausalBlockMask(nn.Module):
         self.threshold = threshold
 
     def allocate_inference_cache(self, batch_size, max_seqlen, device, dtype=None):
-        return CausalBlockMaskState(
+        return DeChunkMaskState(
             last_value=torch.zeros(batch_size, max_seqlen, device=device, dtype=dtype),
         )
 
@@ -160,8 +156,8 @@ class CausalBlockMask(nn.Module):
         block_score,
         cu_seqlens=None,
         mask=None,
-        inference_params: CausalBlockMaskState | None = None,
-    ):
+        inference_params: DeChunkMaskState | None = None,
+    ) -> torch.Tensor:
         """
         boundary_mask: [batch, seq_len] tensor, 1 if boundary (same chunk
         with next 0s), idx = 0 is always 1
@@ -184,7 +180,7 @@ class CausalBlockMask(nn.Module):
                 "CausalBlockMask does not support cu_seqlens yet. Please use mask instead."
             )
 
-        plug_back_idx = torch.cumsum(boundary_mask, dim=1) - 1  # (B, L)
+        plug_back_idx = torch.cumsum(boundary_mask.to(torch.int64), dim=1) - 1  # (B, L)
         if block_score.size(1) == 1:
             # Inference mode: block_score shape is [B, 1, num_key_chunks]
             # Gather along dim=2 to map key indices
@@ -212,17 +208,19 @@ class CausalBlockMask(nn.Module):
                 ),
             )
 
-        block_mask = self.create_chunked_causal_block_mask(
-            block_score=block_mask_score,
-        )
-        score_mod = self.create_score_mod(block_score=block_mask_score)
+        # block_mask = self.create_chunked_causal_block_mask(
+        #     block_score=block_mask_score,
+        # )
+        # score_mod = self.create_score_mod(block_score=block_mask_score)
 
         if inference_params is not None:
             inference_params.last_value.copy_(block_mask_score[:, -1, :])
 
-        return block_mask, score_mod
+        return block_mask_score
 
-    def step(self, boundary_mask, block_score, inference_params: CausalBlockMaskState):
+    def step(
+        self, boundary_mask, block_score, inference_params: DeChunkMaskState
+    ) -> torch.Tensor:
         """
         boundary_mask: [batch,] boolean tensor
         block_score: [batch, 1, num_key_chunks] 확률 텐서
@@ -254,71 +252,9 @@ class CausalBlockMask(nn.Module):
         inference_params.last_value = current_token_score.squeeze(1)
 
         # block_mask와 score_mod 생성
-        block_mask = self.create_chunked_causal_block_mask(
-            block_score=current_token_score,
-        )
-        score_mod = self.create_score_mod(block_score=current_token_score)
+        # block_mask = self.create_chunked_causal_block_mask(
+        #     block_score=current_token_score,
+        # )
+        # score_mod = self.create_score_mod(block_score=current_token_score)
 
-        return block_mask, score_mod
-
-    def create_chunked_causal_block_mask(self, block_score, window_size: int = -1):
-        """
-        Create a block mask for flex_attention based on block_score and threshold.
-
-        Args:
-            block_score: [batch, seq_len, seq_len] tensor of probabilities
-
-        Returns:
-            block_mask: BlockMask for flex_attention
-        """
-        # Apply threshold to create binary mask
-        binary_mask = (block_score > self.threshold).float()
-
-        # Apply causal mask (lower triangular)
-        batch_size, seq_len, _ = binary_mask.shape
-        causal_mask = torch.tril(
-            torch.ones(seq_len, seq_len, device=binary_mask.device)
-        )
-
-        # Combine with causal constraint
-        final_mask = binary_mask * causal_mask.unsqueeze(0)
-
-        if window_size >= 0:
-            window_mask = (
-                torch.tril(final_mask).bool()
-                * ~torch.tril(final_mask, diagonal=-window_size).bool()
-            )
-            final_mask = final_mask * window_mask.unsqueeze(0)
-
-        # Create block mask for flex_attention
-        # flex_attention expects a function that returns True for positions to attend to
-        def mask_fn(b, h, q_idx, kv_idx):
-            return final_mask[b, q_idx, kv_idx] > 0
-
-        block_mask = create_block_mask(
-            mask_fn, B=batch_size, H=1, Q_LEN=seq_len, KV_LEN=seq_len
-        )
-
-        return block_mask
-
-    def create_score_mod(self, block_score):
-        """
-        Create a score modification function for flex_attention.
-
-        Args:
-            block_score: [batch, seq_len, seq_len] tensor of probabilities
-
-        Returns:
-            score_mod: Function for flex_attention score modification
-        """
-
-        def score_mod(score, b, h, q_idx, kv_idx):
-            # Get the block score for this position
-            block_weight = block_score[b, q_idx, kv_idx]
-            # Multiply the attention score by the block score
-            block_weight = (
-                block_weight if block_weight > self.threshold else 1 - block_weight
-            )
-            return score * ste_func(block_weight)
-
-        return score_mod
+        return current_token_score

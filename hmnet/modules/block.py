@@ -7,7 +7,7 @@ from hnet.modules.mlp import SwiGLU
 from mamba_ssm.modules.mamba2 import Mamba2
 from torch import nn
 
-from .mha import CausalBlockMaskMHA
+from .mha import CausalMaskMHA
 
 
 class Mamba2Wrapper(Mamba2):
@@ -16,7 +16,7 @@ class Mamba2Wrapper(Mamba2):
     """
 
     def forward(self, hidden_states, inference_params=None, **kwargs):
-        args = {
+        kwargs = {
             "seqlen": kwargs.get("seqlen", None),
             "seq_idx": kwargs.get("seq_idx", None),
             "cu_seqlens": kwargs.get("cu_seqlens", None),
@@ -55,7 +55,7 @@ def create_block(
     # Mixer
     if arch in ("t", "T"):
         mixer_cls = partial(
-            CausalBlockMaskMHA, **attn_cfg, **factory_kwargs, layer_idx=layer_idx
+            CausalMaskMHA, **attn_cfg, **factory_kwargs, layer_idx=layer_idx
         )
     elif arch in ("m", "M"):
         mixer_cls = partial(

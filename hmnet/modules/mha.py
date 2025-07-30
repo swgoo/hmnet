@@ -5,6 +5,7 @@ from hnet.modules.isotropic import IsotropicInferenceParams
 from hnet.modules.mha import _update_kv_cache
 from hnet.modules.rotary import RotaryEmbedding
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+from .utils import ste_func
 
 
 class FlexAttention(nn.Module):
@@ -72,26 +73,14 @@ class FlexAttention(nn.Module):
         return out
 
 
-def create_window_causal_mask(window_size):
-    def window_causal_mask_Fn(b, h, q_idx, kv_idx):
-        if window_size == -1:
-            return q_idx >= kv_idx
-        elif window_size >= 0:
-            return 0 <= (q_idx - kv_idx) < window_size
-        else:
-            raise ValueError("window_size must be -1 or >= 0")
-
-    return window_causal_mask_Fn
-
-
-class CausalBlockMaskMHA(nn.Module):
+class CausalMaskMHA(nn.Module):
     def __init__(
         self,
         d_model,
         num_heads,
         qkv_proj_bias=False,
         out_proj_bias=False,
-        window_size=-1,
+        window_size=-1,  # -1 for global Attention
         softmax_scale=None,
         layer_idx=None,
         rotary_emb_dim=0,
@@ -99,6 +88,7 @@ class CausalBlockMaskMHA(nn.Module):
         rotary_emb_interleaved=False,
         device=None,
         dtype=None,
+        masking_threshold=0.5,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -106,11 +96,12 @@ class CausalBlockMaskMHA(nn.Module):
         self.layer_idx = layer_idx
         self.softmax_scale = softmax_scale
         self.rotary_emb_dim = rotary_emb_dim
-        assert window_size >= -1, "window_size must be -1 or >= 0"
+        assert window_size >= -1, "window_size must be >= -1"
         self.window_size = window_size
         self.num_heads = num_heads
         assert self.d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.head_dim = self.d_model // num_heads
+        self.masking_threshold = masking_threshold
         kv_dim = self.head_dim * (3 * self.num_heads)
 
         if self.rotary_emb_dim > 0:
@@ -150,8 +141,7 @@ class CausalBlockMaskMHA(nn.Module):
     def forward(
         self,
         x,
-        block_mask=None,
-        score_mod=None,
+        masking_score: torch.Tensor | None = None,
         cu_seqlens=None,
         max_seqlen=None,
         inference_params: IsotropicInferenceParams | None = None,
@@ -160,8 +150,7 @@ class CausalBlockMaskMHA(nn.Module):
         """
         Arguments:
             x: (batch, seqlen, hidden_dim)
-            block_mask: Optional BlockMask for structured attention patterns
-            score_mod: Optional score modifiers for attention
+            masking_score: Optional attention patterns
             cu_seqlens: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths.
             max_seqlen: int. Maximum sequence length in the batch.
             inference_params: for generation.
@@ -199,14 +188,27 @@ class CausalBlockMaskMHA(nn.Module):
 
         q, kv = qkv[:, :, 0], qkv[:, :, 1:]
 
-        if block_mask is None:
+        score_mod = None
+        if masking_score is None:
             block_mask = create_block_mask(
-                create_window_causal_mask(self.window_size),
+                self.create_window_causal_mask(self.window_size),
                 B=qkv.shape[0],
                 H=self.num_heads,
                 Q_LEN=qkv.shape[1],
                 KV_LEN=qkv.shape[1],
             )
+        elif masking_score.dtype == torch.bool:
+            block_mask = self.create_chunked_causal_block_mask(
+                masking_score, window_size=self.window_size
+            )
+        else:
+            masking = masking_score > self.masking_threshold
+            block_mask = self.create_chunked_causal_block_mask(
+                masking, window_size=self.window_size
+            )
+            masking_score = torch.stack(((1 - masking_score), masking_score), dim=-1)
+            masking_confidence = masking_score.max(dim=-1).values
+            score_mod = self.create_score_mod(masking_confidence)
 
         if inference_params is None:
             context = self.inner_attn(
@@ -226,10 +228,76 @@ class CausalBlockMaskMHA(nn.Module):
         out = self.out_proj(rearrange(context, "... h d -> ... (h d)"))
         return out
 
-    def step(self, x, inference_params, block_mask=None, score_mod=None, **kwargs):
+    def step(
+        self, x, inference_params, masking_score: torch.Tensor | None = None, **kwargs
+    ):
         return self.forward(
             x,
-            block_mask=block_mask,
-            score_mod=score_mod,
+            masking_score=masking_score,
             inference_params=inference_params,
         )
+
+    def create_chunked_causal_block_mask(self, mask, window_size: int = -1):
+        """
+        Create a block mask for flex_attention based on block_score and threshold.
+
+        Args:
+            mask: [batch, seq_len, seq_len] boolean tensor
+
+        Returns:
+            block_mask: BlockMask for flex_attention
+        """
+        # Apply causal mask (lower triangular)
+        batch_size, seq_len, _ = mask.shape
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=mask.device))
+
+        # Combine with causal constraint
+        final_mask = mask * causal_mask.unsqueeze(0)
+
+        if window_size >= 0:
+            window_mask = (
+                torch.tril(torch.ones_like(final_mask)).bool()
+                * ~torch.tril(torch.ones_like(final_mask), diagonal=-window_size).bool()
+            )
+            final_mask = final_mask * window_mask.unsqueeze(0)
+
+        # Create block mask for flex_attention
+        # flex_attention expects a function that returns True for positions to attend to
+        def mask_fn(b, h, q_idx, kv_idx):
+            return final_mask[b, q_idx, kv_idx] > 0
+
+        block_mask = create_block_mask(
+            mask_fn, B=batch_size, H=1, Q_LEN=seq_len, KV_LEN=seq_len
+        )
+
+        return block_mask
+
+    def create_score_mod(self, masking_score):
+        """
+        Create a score modification function for flex_attention.
+
+        Args:
+            masking_score: [batch, seq_len, seq_len] tensor of probabilities
+
+        Returns:
+            score_mod: Function for flex_attention score modification
+        """
+
+        def score_mod(score, b, h, q_idx, kv_idx):
+            # Get the block score for this position
+            block_weight = masking_score[b, q_idx, kv_idx]
+            return score * ste_func(block_weight)
+
+        return score_mod
+
+    def create_window_causal_mask(self, window_size):
+        def window_causal_mask_Fn(b, h, q_idx, kv_idx):
+            if window_size == -1:
+                return q_idx >= kv_idx
+            elif window_size >= 0:
+                mask = (q_idx - kv_idx) < window_size
+                return mask >= 0
+            else:
+                raise ValueError("window_size must be -1 or >= 0")
+
+        return window_causal_mask_Fn

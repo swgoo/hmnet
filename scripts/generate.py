@@ -59,7 +59,7 @@ def load_from_pretrained(model_path: str, model_config_path: str):
     # Create config objects
     attn_cfg = AttnConfig(**config.pop("attn_cfg"))
     ssm_cfg = SSMConfig(**config.pop("ssm_cfg"))
-    hnet_cfg = HMNetConfig(**config, attn_cfg=attn_cfg, ssm_cfg=ssm_cfg)
+    hnet_cfg = HNetConfig(**config, attn_cfg=attn_cfg, ssm_cfg=ssm_cfg)
 
     # Create model
     device = "cuda" if torch.cuda.is_available() else "cpu"
