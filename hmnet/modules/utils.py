@@ -1,15 +1,19 @@
-from hnet.modules.utils import *
+from hnet.modules.utils import get_seq_idx, get_stage_cfg
+import torch
 
 
 class STE(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
-        return torch.ones_like(x)
+        return (x > 0.5).float()
 
     @staticmethod
     def backward(ctx, grad_output):
-        grad_x = grad_output
-        return grad_x
+        return grad_output
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        pass
 
 
 def ste_func(x):

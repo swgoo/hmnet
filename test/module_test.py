@@ -20,7 +20,7 @@ def test_create_block():
         x,
         residual=x,
         inference_params=None,
-        mixer_kwargs={"masking_score": masking_score},
+        masking_score=masking_score,
     )
     assert hs.shape == (2, 1200, 640)
     assert res.shape == (2, 1200, 640)

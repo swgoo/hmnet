@@ -5,7 +5,7 @@ from hnet.modules.isotropic import IsotropicInferenceParams
 from hnet.modules.mha import _update_kv_cache
 from hnet.modules.rotary import RotaryEmbedding
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
-from .utils import ste_func
+from .utils import STE
 
 
 class FlexAttention(nn.Module):
@@ -208,6 +208,7 @@ class CausalMaskMHA(nn.Module):
             )
             masking_score = torch.stack(((1 - masking_score), masking_score), dim=-1)
             masking_confidence = masking_score.max(dim=-1).values
+            masking_confidence = STE.apply(None, masking_confidence)
             score_mod = self.create_score_mod(masking_confidence)
 
         if inference_params is None:
@@ -285,8 +286,7 @@ class CausalMaskMHA(nn.Module):
 
         def score_mod(score, b, h, q_idx, kv_idx):
             # Get the block score for this position
-            block_weight = masking_score[b, q_idx, kv_idx]
-            return score * ste_func(block_weight)
+            return score * masking_score[b, q_idx, kv_idx]
 
         return score_mod
 

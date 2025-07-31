@@ -21,7 +21,9 @@ class Mamba2Wrapper(Mamba2):
             "seq_idx": kwargs.get("seq_idx", None),
             "cu_seqlens": kwargs.get("cu_seqlens", None),
         }
-        super().forward(hidden_states, inference_params, **kwargs)
+        return super().forward(
+            hidden_states, inference_params=inference_params, **kwargs
+        )
 
     def step(self, hidden_states, inference_params, **kwargs):
         # Don't use _get_states_from_cache because we want to assert that they exist
@@ -90,6 +92,40 @@ def create_block(
 
 
 class Block(HNetBlock):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None = None,
+        inference_params=None,
+        masking_score=None,
+        mixer_kwargs=None,
+    ):
+        hidden_states, residual = self.norm1(
+            hidden_states,
+            residual=residual,
+            prenorm=True,
+            residual_in_fp32=self.residual_in_fp32,
+        )
+
+        if mixer_kwargs is None:
+            mixer_kwargs = {}
+        hidden_states = self.mixer(
+            hidden_states,
+            inference_params=inference_params,
+            masking_score=masking_score,
+            **mixer_kwargs,
+        )
+
+        if self.mlp is not None:
+            hidden_states, residual = self.norm2(
+                hidden_states,
+                residual=residual,
+                prenorm=True,
+                residual_in_fp32=self.residual_in_fp32,
+            )
+            hidden_states = self.mlp(hidden_states)
+
+        return hidden_states, residual
 
     def step(self, hidden_states, inference_params, residual=None, **kwargs):
         hidden_states, residual = self.norm1(
