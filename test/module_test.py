@@ -104,7 +104,7 @@ from hmnet.modules.mha import CausalMaskMHA
 import torch
 
 
-def test_causal_block_mask_mha():
+def test_causal_mask_mha():
     cbmha = CausalMaskMHA(
         d_model=640,
         num_heads=8,

@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from re import A
 
 import numpy as np
 import torch

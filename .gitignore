@@ -1,4 +1,7 @@
 ckpts/**
+raw/**
+data/**
+logs/**
 
 # temporary path
 **/.tmp

@@ -5,7 +5,7 @@ from flash_attn.ops.triton.layer_norm import RMSNorm
 from hnet.modules.isotropic import Isotropic as HNetIsotropic
 from hnet.models.config_hnet import HNetConfig
 from .block import create_block
-from .utils import get_seq_idx
+from hnet.modules.utils import get_seq_idx
 from copy import deepcopy
 
 

@@ -5,7 +5,7 @@ from hnet.modules.isotropic import IsotropicInferenceParams
 from hnet.modules.mha import _update_kv_cache
 from hnet.modules.rotary import RotaryEmbedding
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
-from .utils import STE
+from .utils import ste_func
 
 
 class FlexAttention(nn.Module):
@@ -208,7 +208,9 @@ class CausalMaskMHA(nn.Module):
             )
             masking_score = torch.stack(((1 - masking_score), masking_score), dim=-1)
             masking_confidence = masking_score.max(dim=-1).values
-            masking_confidence = STE.apply(None, masking_confidence)
+            masking_confidence = ste_func(
+                masking_confidence, threshold=self.masking_threshold
+            )
             score_mod = self.create_score_mod(masking_confidence)
 
         if inference_params is None:
@@ -257,8 +259,11 @@ class CausalMaskMHA(nn.Module):
 
         if window_size >= 0:
             window_mask = (
-                torch.tril(torch.ones_like(final_mask)).bool()
-                * ~torch.tril(torch.ones_like(final_mask), diagonal=-window_size).bool()
+                torch.tril(torch.ones(seq_len, seq_len, device=mask.device)).bool()
+                * ~torch.tril(
+                    torch.ones(seq_len, seq_len, device=mask.device),
+                    diagonal=-window_size,
+                ).bool()
             )
             final_mask = final_mask * window_mask.unsqueeze(0)
 

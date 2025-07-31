@@ -1,2 +1,3 @@
 git+https://github.com/goombalab/hnet.git
+causal-conv1d
 pytest

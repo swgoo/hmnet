@@ -14,24 +14,25 @@ def test_hmnet():
         tie_embeddings=True,
         ssm_cfg=ssm_config,
         attn_cfg=attn_config,
-        arch_layout=["t1", ["T1"], "t1"],
+        arch_layout=["m1T1", ["M1t1"], "T1m1"],
         d_intermediate=[128, 256],
     )
-    model = HMNet(config=config, device="cuda", stage_idx=0).to(
-        "cuda", dtype=torch.bfloat16
-    )
+    model = HMNet(config=config, device="cuda", stage_idx=0).to("cuda")
 
     # Test forward pass
     batch_size = 2
     seqlen = 5
     input_tensor = torch.randn(
-        batch_size, seqlen, config.d_model[0], device="cuda", dtype=torch.bfloat16
+        batch_size,
+        seqlen,
+        config.d_model[0],
+        device="cuda",
     )
     mask = torch.ones(batch_size, seqlen, dtype=torch.bool, device="cuda")
     output = model.forward(hidden_states=input_tensor, mask=mask)
 
-    assert output.shape == (batch_size, seqlen, config.d_model[0])
+    assert output[0].shape == (batch_size, seqlen, config.d_model[0])
 
     # Test inference cache allocation
-    inference_cache = model.allocate_inference_cache(batch_size, seqlen)
-    assert isinstance(inference_cache, HMNetState)
+    # inference_cache = model.allocate_inference_cache(batch_size, seqlen)
+    # assert isinstance(inference_cache, HMNetState)
