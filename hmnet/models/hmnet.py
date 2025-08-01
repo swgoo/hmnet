@@ -4,6 +4,7 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 from hnet.models.config_hnet import HNetConfig
+from .config_hmnet import HMNetConfig
 from hnet.modules.dc import (
     ChunkLayer,
     DeChunkLayer,
@@ -37,7 +38,7 @@ class HMNetState:
 class HMNet(nn.Module):
     def __init__(
         self,
-        config: HNetConfig,
+        config: HMNetConfig,
         stage_idx: int,
         device=None,
         dtype=None,
@@ -47,7 +48,7 @@ class HMNet(nn.Module):
 
         self.stage_idx = stage_idx
         self.d_model = config.d_model[stage_idx]
-        self.window_size = config.attn_cfg.window_size[stage_idx]
+        # self.window_size = config.attn_cfg.window_size[stage_idx]
 
         arch_layout = config.arch_layout
         for _ in range(stage_idx):
@@ -63,20 +64,20 @@ class HMNet(nn.Module):
 
         if self.is_innermost:
             self.main_network = Isotropic(
-                config=config,
+                config=config.decoder_hnet_config(),
                 stage_idx=stage_idx,
                 pos_idx=0,  # Assuming the innermost network is at position 0
                 **factory_kwargs,
             )
         else:
             self.encoder = Isotropic(
-                config=config,
+                config=config.encoder_hnet_config(),
                 stage_idx=stage_idx,
                 pos_idx=0,
                 **factory_kwargs,
             )
             self.decoder = Isotropic(
-                config=config,
+                config=config.decoder_hnet_config(),
                 stage_idx=stage_idx,
                 pos_idx=2,
                 **factory_kwargs,
@@ -89,7 +90,9 @@ class HMNet(nn.Module):
             self.routing_module = RoutingModule(self.d_model, **factory_kwargs)
             self.chunk_layer = ChunkLayer()
             self.dechunk_layer = DeChunkLayer(self.d_model)
-            self.dechunk_mask_layer = DeChunkMaskLayer(self.window_size)
+            self.dechunk_mask_layer = DeChunkMaskLayer(
+                config.decoder_attn_cfg.window_size[stage_idx]
+            )
             self.masking_module = MaskingModule(self.d_model, **factory_kwargs)
 
             # do the residual in fp32

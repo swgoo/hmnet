@@ -1,6 +1,7 @@
 import torch
+from hmnet.models.config_hmnet import HMNetConfig
 from hmnet.models.hmnet import HMNet, HMNetState
-from hnet.models.config_hnet import HNetConfig, SSMConfig, AttnConfig
+from hnet.models.config_hnet import SSMConfig, AttnConfig
 
 
 def test_hmnet():
@@ -8,12 +9,14 @@ def test_hmnet():
     attn_config = AttnConfig(
         num_heads=[16, 16], rotary_emb_dim=[4, 4], window_size=[1023, -1]
     )
-    config = HNetConfig(
+    config = HMNetConfig(
         d_model=[64, 128],
         vocab_size=256,
         tie_embeddings=True,
-        ssm_cfg=ssm_config,
-        attn_cfg=attn_config,
+        encoder_attn_cfg=attn_config,
+        decoder_attn_cfg=attn_config,
+        encoder_ssm_cfg=ssm_config,
+        decoder_ssm_cfg=ssm_config,
         arch_layout=["m1T1", ["M1t1"], "T1m1"],
         d_intermediate=[128, 256],
     )
