@@ -8,7 +8,7 @@ class STE(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output
+        return grad_output, None
 
 
 def ste_func(x, threshold=0.5):

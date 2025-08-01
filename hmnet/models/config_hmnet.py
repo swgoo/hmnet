@@ -1,11 +1,11 @@
 from dataclasses import dataclass, field
-from typing import List, Union
+from typing import Any, List, Union
 from hnet.models.config_hnet import SSMConfig, AttnConfig, HNetConfig
 
 
 @dataclass
 class HMNetConfig:
-    arch_layout: List[Union[str, List]] = field(default_factory=list)
+    arch_layout: List[Any] = field(default_factory=list)
     d_model: List[int] = field(default_factory=list)
     # intermediate dimension for the FFNs (0 indicates no FFN)
     d_intermediate: List[int] = field(default_factory=list)

@@ -17,7 +17,7 @@ def test_hmnet():
         decoder_attn_cfg=attn_config,
         encoder_ssm_cfg=ssm_config,
         decoder_ssm_cfg=ssm_config,
-        arch_layout=["m1T1", ["M1t1"], "T1m1"],
+        arch_layout=["m1T1", ["t1"], "T1m1"],
         d_intermediate=[128, 256],
     )
     model = HMNet(config=config, device="cuda", stage_idx=0).to("cuda")
@@ -32,7 +32,7 @@ def test_hmnet():
         device="cuda",
     )
     mask = torch.ones(batch_size, seqlen, dtype=torch.bool, device="cuda")
-    output = model.forward(hidden_states=input_tensor, mask=mask)
+    output = model(hidden_states=input_tensor, mask=mask)
 
     assert output[0].shape == (batch_size, seqlen, config.d_model[0])
 

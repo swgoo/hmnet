@@ -4,7 +4,9 @@ services:
       dockerfile: .dockerfile
     command: tail -f /dev/null
     volumes:
-      - .:/workdir
+      - .:/workspace
+    environment:
+      - PYTHONPATH=/workspace:${PYTHONPATH}
     deploy:
       resources:
         reservations:

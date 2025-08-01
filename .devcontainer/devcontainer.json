@@ -4,7 +4,7 @@
 		"../docker-compose.yml"
 	],
 	"service": "dev",
-	"workspaceFolder": "/workdir",
+	"workspaceFolder": "/workspace",
 	"shutdownAction": "stopCompose",
 	"extensions": [
 		"ms-python.python",
