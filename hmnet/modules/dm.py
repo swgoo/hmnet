@@ -14,6 +14,7 @@ class MaskingModuleState:
     seqlen_offset: int = 0
     batch_size_offset: int = 0
     key_memory: torch.Tensor | None = None
+    last_query: torch.Tensor | None = None
 
     def reset(self, max_seqlen, max_batch_size):
         self.max_seqlen = max_seqlen
@@ -21,6 +22,8 @@ class MaskingModuleState:
         self.seqlen_offset = 0
         if self.key_memory is not None:
             self.key_memory.zero_()
+        if self.last_query is not None:
+            self.last_query.zero_()
 
 
 def _update_k_cache(k: torch.Tensor, inference_params: MaskingModuleState):
@@ -99,11 +102,12 @@ class MaskingModule(nn.Module):
         qk = self.Wqk(hidden_states)
         qk = rearrange(qk, "... (two d) -> ... two d", two=2, d=self.d_model)
         q, k = qk[:, :, 0], qk[:, :, 1]
-        if inference_params is None:
-            attn_score = self.attention_score(q, k)
-        else:
-            k_cache = self._update_k_cache(k, inference_params)
-            attn_score = self.attention_score(q, k_cache)
+        attn_score = self.attention_score(q, k)
+
+        if inference_params is not None:
+            self._update_k_cache(k, inference_params)
+            inference_params.seqlen_offset += int(k.shape[1])
+            inference_params.last_query = q[:, -1, :]
 
         return attn_score
 
@@ -117,11 +121,30 @@ class MaskingModule(nn.Module):
         return attn_score
 
     def step(self, hidden_states: torch.Tensor, inference_params: MaskingModuleState):
-        attn_score = self.forward(
-            hidden_states=hidden_states,
-            inference_params=inference_params,
-        )
-        inference_params.seqlen_offset += 1
+        if hidden_states.shape[0] > 0:
+            qk = self.Wqk(hidden_states)
+            qk = rearrange(qk, "... (two d) -> ... two d", two=2, d=self.d_model)
+            q, k = qk[:, :, 0], qk[:, :, 1]
+            k_cache = self._update_k_cache(k, inference_params)
+            attn_score = self.attention_score(
+                q, k_cache.to(device=hidden_states.device)
+            )
+            inference_params.last_query = q.squeeze(1)
+            inference_params.seqlen_offset += 1
+        else:
+            k_empty = torch.empty(
+                1,
+                0,
+                self.d_model,
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            )
+            k_cache = self._update_k_cache(k_empty, inference_params)
+            q_last = inference_params.last_query
+            attn_score = self.attention_score(
+                q_last.unsqueeze(1).to(hidden_states.device),
+                k_cache.to(device=hidden_states.device),
+            )
         return attn_score
 
 
@@ -134,7 +157,8 @@ class DeChunkMaskState:
         - [last_value] (batch_size, seqlen) tensor. The last value of the batch element
     """
 
-    last_value: torch.Tensor  # (batch_size, seqlen)
+    last_masking_score: torch.Tensor  # (batch_size, seqlen)
+    last_boundary_mask: torch.Tensor  # (batch_size, seqlen)
 
 
 class DeChunkMaskLayer(nn.Module):
@@ -146,13 +170,18 @@ class DeChunkMaskLayer(nn.Module):
 
     def allocate_inference_cache(self, batch_size, max_seqlen, device, dtype=None):
         return DeChunkMaskState(
-            last_value=torch.zeros(batch_size, max_seqlen, device=device, dtype=dtype),
+            last_masking_score=torch.zeros(
+                batch_size, max_seqlen, device=device, dtype=dtype
+            ),
+            last_boundary_mask=torch.zeros(
+                batch_size, max_seqlen, device=device, dtype=torch.bool
+            ),
         )
 
     def forward(
         self,
         boundary_mask,
-        block_score,
+        block_score: torch.Tensor,
         cu_seqlens=None,
         mask=None,
         inference_params: DeChunkMaskState | None = None,
@@ -173,6 +202,8 @@ class DeChunkMaskLayer(nn.Module):
             assert boundary_mask[
                 :, 0
             ].all(), "First token must be a boundary if running prefill"
+
+        block_score = torch.clamp(block_score, min=1e-4, max=1.0 - 1e-4)
 
         if cu_seqlens is not None:
             raise NotImplementedError(
@@ -213,7 +244,8 @@ class DeChunkMaskLayer(nn.Module):
         # score_mod = self.create_score_mod(block_score=block_mask_score)
 
         if inference_params is not None:
-            inference_params.last_value.copy_(block_mask_score[:, -1, :])
+            inference_params.last_masking_score = block_mask_score[:, -1, :]
+            inference_params.last_boundary_mask = boundary_mask
 
         return block_mask_score
 
@@ -228,32 +260,44 @@ class DeChunkMaskLayer(nn.Module):
         Returns:
             block_mask, score_mod: flex_attention에 사용될 마스크와 스코어 수정 함수
         """
-        # 새로운 토큰이 들어왔을 때 처리
         B = boundary_mask.shape[0]
-        # B_selected = block_score.shape[0]
 
-        seq_len = inference_params.last_value.shape[-1]
+        seq_len = inference_params.last_masking_score.shape[-1]
 
-        # 현재 토큰에 대한 block_mask_score 생성
-        current_token_score = torch.zeros(
+        current_masking_score = torch.zeros(
             B, 1, seq_len + 1, device=block_score.device, dtype=block_score.dtype
         )
 
-        # 기존 스코어 복사
-        current_token_score[:, :, :seq_len] = inference_params.last_value.unsqueeze(1)
-        # 현재 토큰의 마지막 값은 이전 값의 마지막 값과 동일하게 설정
-        current_token_score[:, :, -1] = inference_params.last_value[:, -1]
+        current_masking_score[:, :, :seq_len] = (
+            inference_params.last_masking_score.unsqueeze(1)
+        )
+        current_masking_score[:, :, -1] = inference_params.last_masking_score[:, -1]
 
-        # boundary_mask가 True인 경우에만 block_score를 업데이트
-        current_token_score[boundary_mask] = block_score[boundary_mask]
+        last_boundary_mask = inference_params.last_boundary_mask
+        cur_boundary_mask = torch.concat(
+            [
+                last_boundary_mask,
+                boundary_mask.unsqueeze(1),
+            ],
+            dim=1,
+        )
 
-        # 마지막 값 업데이트
-        inference_params.last_value = current_token_score.squeeze(1)
+        if boundary_mask.sum() > 0:
 
-        # block_mask와 score_mod 생성
-        # block_mask = self.create_chunked_causal_block_mask(
-        #     block_score=current_token_score,
-        # )
-        # score_mod = self.create_score_mod(block_score=current_token_score)
+            plug_back_idx = torch.cumsum(cur_boundary_mask.to(torch.int64), dim=1) - 1
 
-        return current_token_score
+            current_block_score = torch.zeros_like(
+                plug_back_idx, device=block_score.device, dtype=block_score.dtype
+            ).unsqueeze(1)
+            current_block_score[:, :, : block_score.size(2)] = block_score[:, :, :]
+
+            current_masking_score = torch.gather(
+                current_block_score,
+                dim=-1,
+                index=plug_back_idx.unsqueeze(-2),
+            )
+
+        inference_params.last_masking_score = current_masking_score[:, -1, :]
+        inference_params.last_boundary_mask = cur_boundary_mask
+
+        return current_masking_score

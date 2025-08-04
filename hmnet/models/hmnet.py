@@ -32,7 +32,7 @@ class HMNetState:
     dechunk_state: Optional[DeChunkState] = None
     decoder_state: Optional[IsotropicInferenceParams] = None
     masking_state: Optional[MaskingModuleState] = None
-    causal_block_mask_state: Optional[DeChunkMaskState] = None
+    dechunk_mask_state: Optional[DeChunkMaskState] = None
 
 
 class HMNet(nn.Module):
@@ -156,7 +156,7 @@ class HMNet(nn.Module):
                 masking_state=self.masking_module.allocate_inference_cache(
                     batch_size, max_seqlen, device, dtype=dtype
                 ),
-                causal_block_mask_state=self.dechunk_mask_layer.allocate_inference_cache(
+                dechunk_mask_state=self.dechunk_mask_layer.allocate_inference_cache(
                     batch_size, max_seqlen, device, dtype=dtype
                 ),
             )
@@ -260,6 +260,7 @@ class HMNet(nn.Module):
             boundary_mask=bpred_output.boundary_mask,
             block_score=mask_prediction,
             mask=mask,
+            inference_params=inference_params.dechunk_mask_state,
         )
 
         hidden_states = self.decoder(
@@ -322,15 +323,15 @@ class HMNet(nn.Module):
             prev_boundary_predictions = []
             prev_mask_predictions = []
 
-        mask_prediction = self.masking_module.step(
-            hidden_states_inner, inference_params.masking_state
-        )
-
         hidden_states = self.dechunk_layer.step(
             hidden_states_inner,
             bpred_output.boundary_mask,
             bpred_output.boundary_prob,
             inference_params.dechunk_state,
+        )
+
+        mask_prediction = self.masking_module.step(
+            hidden_states_inner, inference_params.masking_state
         )
 
         hidden_states = self.residual_func(
@@ -341,7 +342,7 @@ class HMNet(nn.Module):
         masking_score = self.dechunk_mask_layer.step(
             boundary_mask=bpred_output.boundary_mask,
             block_score=mask_prediction,
-            inference_params=inference_params.causal_block_mask_state,
+            inference_params=inference_params.dechunk_mask_state,
         )
         hidden_states = self.decoder.step(
             hidden_states,

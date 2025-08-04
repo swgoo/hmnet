@@ -121,7 +121,7 @@ class Isotropic(HNetIsotropic):
 
         return hidden_states
 
-    def step(self, hidden_states, inference_params, **kwargs):
+    def step(self, hidden_states, inference_params, masking_score=None, **kwargs):
         """
         Assumes hidden_states is (B, 1, D). Steps each of the layers in order, and then steps the main model.
         """
@@ -129,7 +129,11 @@ class Isotropic(HNetIsotropic):
 
         for layer in self.layers:
             hidden_states, residual = layer.step(
-                hidden_states, inference_params, residual=residual, **kwargs
+                hidden_states,
+                inference_params,
+                residual=residual,
+                masking_score=masking_score,
+                **kwargs,
             )
 
         hidden_states = self.rmsnorm(
