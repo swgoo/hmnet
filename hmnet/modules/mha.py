@@ -12,13 +12,6 @@ from .utils import ste_func
 
 
 class FlexAttention(nn.Module):
-    """Implement causal cross-attention using FlexAttention with block mask support.
-    Arguments
-    ---------
-        softmax_scale: The temperature to use for the softmax attention.
-                      (default: 1/sqrt(d_keys) where d_keys is computed at
-                      runtime)
-    """
 
     def __init__(
         self,
@@ -36,16 +29,6 @@ class FlexAttention(nn.Module):
         cu_seqlens=None,
         max_seqlen=None,
     ):
-        """Implements the multihead softmax attention using FlexAttention.
-        Arguments
-        ---------
-            q: The tensor containing the query. (B, S_q, H, D)
-            kv: The tensor containing the key and value. (B, S_kv, 2, H, D)
-            block_mask: Optional BlockMask for structured attention patterns
-        Returns:
-        --------
-            out: (B, S, H, D)
-        """
         assert q.dtype in [torch.float16, torch.bfloat16, torch.float32]
         assert kv.dtype in [torch.float16, torch.bfloat16, torch.float32]
         if cu_seqlens is not None or max_seqlen is not None:
@@ -198,17 +181,13 @@ class CausalMaskMHA(nn.Module):
             masking_score.to(device=x.device) if masking_score is not None else None
         )
         if inference_params is None:
-            masking_score, score_mod, block_mask = self.create_masks(
-                masking_score, q, kv
-            )
+            score_mod, block_mask = self.create_masks(masking_score, q, kv)
             context = self.inner_attn(
                 q, kv, block_mask=block_mask, score_mod=score_mod, **kwargs
             )
         else:
             kv_cache = self._update_kv_cache(kv, inference_params)
-            masking_score, score_mod, block_mask = self.create_masks(
-                masking_score, q, kv_cache
-            )
+            score_mod, block_mask = self.create_masks(masking_score, q, kv_cache)
             context = self.inner_attn(
                 q,
                 kv_cache,
@@ -222,38 +201,40 @@ class CausalMaskMHA(nn.Module):
         return out
 
     def create_masks(self, masking_score, q, kv):
-        score_mod = None
+        batch_size, q_len, kv_len = q.shape[0], q.shape[1], kv.shape[1]
+
         if masking_score is None:
             block_mask = create_block_mask(
                 self.create_window_causal_mask(self.window_size),
-                B=q.shape[0],
+                B=batch_size,
                 H=self.num_heads,
-                Q_LEN=q.shape[1],
-                KV_LEN=kv.shape[1],
+                Q_LEN=q_len,
+                KV_LEN=kv_len,
             )
-        elif masking_score.dtype == torch.bool:
-            block_mask = self.create_chunked_causal_mask(
-                masking_score, window_size=self.window_size
-            )
-            block_mask = create_block_mask(
-                block_mask, B=q.shape[0], H=1, Q_LEN=q.shape[1], KV_LEN=kv.shape[1]
-            )
+            return None, block_mask
+
+        if masking_score.dtype == torch.bool:
+            masking = masking_score
+            score_mod = None
         else:
             masking = masking_score > self.masking_threshold
-
-            block_mask = self.create_chunked_causal_mask(
-                masking, window_size=self.window_size
+            masking_confidence = torch.where(
+                masking_score > self.masking_threshold, masking_score, 1 - masking_score
             )
-            block_mask = create_block_mask(
-                block_mask, B=q.shape[0], H=1, Q_LEN=q.shape[1], KV_LEN=kv.shape[1]
-            )
-            masking_score = torch.stack(((1 - masking_score), masking_score), dim=-1)
-            masking_confidence = masking_score.max(dim=-1).values
             masking_confidence = ste_func(
                 masking_confidence, threshold=self.masking_threshold
             )
             score_mod = self.create_score_mod(masking_confidence)
-        return masking_score, score_mod, block_mask
+
+        block_mask = create_block_mask(
+            self.create_chunked_causal_mask(masking, window_size=self.window_size),
+            B=batch_size,
+            H=1,
+            Q_LEN=q_len,
+            KV_LEN=kv_len,
+        )
+
+        return score_mod, block_mask
 
     def step(
         self, x, inference_params, masking_score: torch.Tensor | None = None, **kwargs
@@ -274,54 +255,53 @@ class CausalMaskMHA(nn.Module):
         Returns:
             block_mask: BlockMask for flex_attention
         """
-        # Apply causal mask (lower triangular)
         batch_size, seq_len, _ = mask.shape
-        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=mask.device))
+        device = mask.device
 
-        # Combine with causal constraint
-        final_mask = mask * causal_mask.unsqueeze(0)
+        if not hasattr(self, "_mask_cache"):
+            self._mask_cache = {}
 
-        if window_size >= 0:
-            window_mask = (
-                torch.tril(torch.ones(seq_len, seq_len, device=mask.device)).bool()
-                * ~torch.tril(
-                    torch.ones(seq_len, seq_len, device=mask.device),
-                    diagonal=-window_size,
-                ).bool()
+        cache_key = (seq_len, window_size, device)
+        if cache_key not in self._mask_cache:
+            causal = torch.tril(
+                torch.ones(seq_len, seq_len, device=device, dtype=torch.bool)
             )
-            final_mask = final_mask * window_mask.unsqueeze(0)
+            if window_size >= 0:
+                small_tril = torch.tril(
+                    torch.ones(seq_len, seq_len, device=device, dtype=torch.bool),
+                    diagonal=-window_size,
+                )
+                window_mask = causal & ~small_tril
+            else:
+                window_mask = causal
+            self._mask_cache[cache_key] = window_mask
 
-        # Create block mask for flex_attention
-        # flex_attention expects a function that returns True for positions to attend to
+        window_mask = self._mask_cache[cache_key]  # [seq_len, seq_len] bool
+        final_mask = mask & window_mask.unsqueeze(0)  # [batch, seq_len, seq_len]
+
         def mask_fn(b, h, q_idx, kv_idx):
-            return final_mask[b, q_idx, kv_idx] > 0
+            return final_mask[b, q_idx, kv_idx]
 
         return mask_fn
 
     def create_score_mod(self, masking_score):
-        """
-        Create a score modification function for flex_attention.
-
-        Args:
-            masking_score: [batch, seq_len, seq_len] tensor of probabilities
-
-        Returns:
-            score_mod: Function for flex_attention score modification
-        """
-
         def score_mod(score, b, h, q_idx, kv_idx):
-            # Get the block score for this position
             return score * masking_score[b, q_idx, kv_idx]
 
         return score_mod
 
     def create_window_causal_mask(self, window_size):
-        def window_causal_mask_Fn(b, h, q_idx, kv_idx):
-            if window_size == -1:
+        if window_size == -1:
+
+            def window_causal_mask_Fn(b, h, q_idx, kv_idx):
                 return q_idx >= kv_idx
-            elif window_size >= 0:
-                return (q_idx - kv_idx) < window_size
-            else:
-                raise ValueError("window_size must be -1 or >= 0")
+
+        elif window_size >= 0:
+
+            def window_causal_mask_Fn(b, h, q_idx, kv_idx):
+                return (q_idx >= kv_idx) & ((q_idx - kv_idx) <= window_size)
+
+        else:
+            raise ValueError("window_size must be -1 or >= 0")
 
         return window_causal_mask_Fn

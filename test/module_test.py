@@ -96,14 +96,14 @@ def test_causal_mask_mha():
         d_model=640,
         num_heads=8,
     ).cuda()
-    masking_score = (torch.ones(2, 1200, 1200) * 0.1).to(
-        "cuda"
-    )  # (batch_size, seq_len, seq_len)
 
     x = torch.ones(2, 1200, 640).to("cuda")  # (batch_size, seq_len, d_model)
     # Simulate a checkpoint loading scenario
-
-    output = cbmha(x, masking_score=masking_score)
+    for _ in range(100):
+        masking_score = (torch.rand(2, 1200, 1200)).to(
+            "cuda"
+        )  # (batch_size, seq_len, seq_len)
+        output = cbmha(x, masking_score=masking_score)
     assert output.shape == (2, 1200, 640)  # Output shape should match the input shape
 
 
