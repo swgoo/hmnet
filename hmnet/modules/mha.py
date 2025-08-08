@@ -127,7 +127,7 @@ class CausalMaskMHA(nn.Module):
     def forward(
         self,
         x,
-        masking_score: torch.Tensor | None = None,
+        mask_score: torch.Tensor | None = None,
         cu_seqlens=None,
         max_seqlen=None,
         inference_params: IsotropicInferenceParams | None = None,
@@ -177,17 +177,15 @@ class CausalMaskMHA(nn.Module):
             )
 
         q, kv = qkv[:, :, 0], qkv[:, :, 1:]
-        masking_score = (
-            masking_score.to(device=x.device) if masking_score is not None else None
-        )
+        mask_score = mask_score.to(device=x.device) if mask_score is not None else None
         if inference_params is None:
-            score_mod, block_mask = self.create_masks(masking_score, q, kv)
+            score_mod, block_mask = self.create_masks(mask_score, q, kv)
             context = self.inner_attn(
                 q, kv, block_mask=block_mask, score_mod=score_mod, **kwargs
             )
         else:
             kv_cache = self._update_kv_cache(kv, inference_params)
-            score_mod, block_mask = self.create_masks(masking_score, q, kv_cache)
+            score_mod, block_mask = self.create_masks(mask_score, q, kv_cache)
             context = self.inner_attn(
                 q,
                 kv_cache,
@@ -200,10 +198,10 @@ class CausalMaskMHA(nn.Module):
         out = self.out_proj(rearrange(context, "... h d -> ... (h d)"))
         return out
 
-    def create_masks(self, masking_score, q, kv):
+    def create_masks(self, mask_score, q, kv):
         batch_size, q_len, kv_len = q.shape[0], q.shape[1], kv.shape[1]
 
-        if masking_score is None:
+        if mask_score is None:
             block_mask = create_block_mask(
                 self.create_window_causal_mask(self.window_size),
                 B=batch_size,
@@ -213,13 +211,13 @@ class CausalMaskMHA(nn.Module):
             )
             return None, block_mask
 
-        if masking_score.dtype == torch.bool:
-            masking = masking_score
+        if mask_score.dtype == torch.bool:
+            masking = mask_score
             score_mod = None
         else:
-            masking = masking_score > self.masking_threshold
+            masking = mask_score > self.masking_threshold
             masking_confidence = torch.where(
-                masking_score > self.masking_threshold, masking_score, 1 - masking_score
+                mask_score > self.masking_threshold, mask_score, 1 - mask_score
             )
             masking_confidence = ste_func(
                 masking_confidence, threshold=self.masking_threshold
@@ -241,21 +239,12 @@ class CausalMaskMHA(nn.Module):
     ):
         return self.forward(
             x,
-            masking_score=masking_score,
+            mask_score=masking_score,
             inference_params=inference_params,
         )
 
     def create_chunked_causal_mask(self, mask, window_size: int = -1):
-        """
-        Create a block mask for flex_attention based on block_score and threshold.
-
-        Args:
-            mask: [batch, seq_len, seq_len] boolean tensor
-
-        Returns:
-            block_mask: BlockMask for flex_attention
-        """
-        batch_size, seq_len, _ = mask.shape
+        seq_len = mask.shape[-2]
         device = mask.device
 
         if not hasattr(self, "_mask_cache"):
@@ -284,9 +273,9 @@ class CausalMaskMHA(nn.Module):
 
         return mask_fn
 
-    def create_score_mod(self, masking_score):
+    def create_score_mod(self, mask_score):
         def score_mod(score, b, h, q_idx, kv_idx):
-            return score * masking_score[b, q_idx, kv_idx]
+            return score * mask_score[b, q_idx, kv_idx]
 
         return score_mod
 

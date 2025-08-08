@@ -2,7 +2,11 @@ import torch
 from hnet.models.config_hnet import AttnConfig, HNetConfig, SSMConfig
 
 from hmnet.modules.block import create_block
-from hmnet.modules.dm import DeChunkMaskLayer, MaskingModule, MaskingModuleState
+from hmnet.modules.dm import (
+    DeChunkAttnScoreLayer,
+    ChunkAttnScoreModule,
+    ChunkAttnScoreState,
+)
 from hmnet.modules.isotropic import Isotropic
 from hmnet.modules.mha import CausalMaskMHA
 
@@ -25,7 +29,7 @@ def test_create_block():
         x,
         residual=x,
         inference_params=None,
-        masking_score=masking_score,
+        mask_score=masking_score,
     )
     assert hs.shape == (2, 1200, 640)
     assert res.shape == (2, 1200, 640)
@@ -38,8 +42,8 @@ def test_masking_module():
     max_seqlen = 10
     max_batch_size = 4
 
-    module = MaskingModule(d_model=d_model, device="cpu", dtype=torch.float32)
-    inference_params = MaskingModuleState(
+    module = ChunkAttnScoreModule(d_model=d_model, device="cpu", dtype=torch.float32)
+    inference_params = ChunkAttnScoreState(
         max_seqlen=max_seqlen, max_batch_size=max_batch_size
     )
     x = torch.randn(batch_size, seqlen, d_model)
@@ -55,10 +59,10 @@ def test_masking_module():
         ],
         dtype=torch.float32,
     )
-    cbm_module = DeChunkMaskLayer(window_size=5)
+    cbm_module = DeChunkAttnScoreLayer(window_size=5)
     x = torch.randn(batch_size, seqlen, d_model)
     mask_score = cbm_module.forward(
-        boundary_mask=boundary_mask, block_score=block_score, mask=mask
+        boundary_mask=boundary_mask, chunk_attn_score=block_score, mask=mask
     )
     assert mask_score.shape == (batch_size, seqlen, seqlen)
 
@@ -87,7 +91,7 @@ def test_isotropic_block():
         "cuda"
     )  # (batch_size, seq_len, seq_len)
     mask = torch.ones(2, 1200).to("cuda")  # (batch_size, seq_len)
-    output = isotropic_layer.forward(x, mask=mask, masking_score=masking_score)
+    output = isotropic_layer.forward(x, mask=mask, mask_score=masking_score)
     assert output.shape == (2, 1200, 640)  # Output shape
 
 
@@ -100,10 +104,10 @@ def test_causal_mask_mha():
     x = torch.ones(2, 1200, 640).to("cuda")  # (batch_size, seq_len, d_model)
     # Simulate a checkpoint loading scenario
     for _ in range(100):
-        masking_score = (torch.rand(2, 1200, 1200)).to(
+        mask_score = (torch.rand(2, 1200, 1200)).to(
             "cuda"
         )  # (batch_size, seq_len, seq_len)
-        output = cbmha(x, masking_score=masking_score)
+        output = cbmha(x, mask_score=mask_score)
     assert output.shape == (2, 1200, 640)  # Output shape should match the input shape
 
 
@@ -128,22 +132,8 @@ def test_window_tril_score():
     assert torch.equal(window_mask, expected_mask)
 
 
-def test_masking_module():
-
-    masking_module = MaskingModule(
-        d_model=64,
-        device="cuda",
-        dtype=torch.float32,
-    )
-    batch_size = 2
-    seqlen = 5
-    x = torch.randn(batch_size, seqlen, 64).to("cuda")
-    block_score = masking_module.forward(x)
-    assert block_score.shape == (batch_size, seqlen, seqlen)
-
-
 def test_masking_module_step():
-    masking_module = MaskingModule(
+    masking_module = ChunkAttnScoreModule(
         d_model=64,
         device="cuda",
         dtype=torch.float32,
@@ -167,23 +157,45 @@ def test_masking_module_step():
     assert block_score.shape == (batch_size, 1, seqlen + n_step)
 
 
-def test_dechunk_mask_layer():
-    batch_size = 2
+def test_dechunk_mask_layer_2d():
+    batch_size = 3
     seqlen = 5
     window_size = 3
     boundary_mask = torch.tensor(
         [
-            [1, 0, 0, 0, 0],
+            [1, 0, 1, 0, 0],
             [1, 0, 1, 1, 0],
+            [1, 0, 0, 0, 1],
         ],
         dtype=torch.float32,
     )
     mask = torch.ones(batch_size, seqlen, seqlen, dtype=torch.float32)
     block_score = torch.rand(batch_size, seqlen, seqlen)
 
-    de_chunk_mask_layer = DeChunkMaskLayer(window_size=window_size)
+    de_chunk_mask_layer = DeChunkAttnScoreLayer(window_size=window_size)
     mask_score = de_chunk_mask_layer.forward(
-        boundary_mask=boundary_mask, block_score=block_score, mask=mask
+        boundary_mask=boundary_mask, chunk_attn_score=block_score, mask=mask
+    )
+    assert mask_score.shape == (batch_size, seqlen, seqlen)
+
+
+def test_dechunk_mask_layer_1d():
+    batch_size = 2
+    seqlen = 1
+    window_size = 3
+    boundary_mask = torch.tensor(
+        [
+            [1],
+            [1],
+        ],
+        dtype=torch.float32,
+    )
+    mask = torch.ones(batch_size, seqlen, seqlen, dtype=torch.float32)
+    block_score = torch.rand(batch_size, seqlen, seqlen)
+
+    de_chunk_mask_layer = DeChunkAttnScoreLayer(window_size=window_size)
+    mask_score = de_chunk_mask_layer.forward(
+        boundary_mask=boundary_mask, chunk_attn_score=block_score, mask=mask
     )
     assert mask_score.shape == (batch_size, seqlen, seqlen)
 
@@ -202,7 +214,7 @@ def test_dechunk_mask_layer_step():
     mask = torch.ones(batch_size, seqlen, seqlen, dtype=torch.float32)
     block_score = torch.rand(batch_size, seqlen, seqlen)
 
-    de_chunk_mask_layer = DeChunkMaskLayer(window_size=window_size)
+    de_chunk_mask_layer = DeChunkAttnScoreLayer(window_size=window_size)
     inference_params = de_chunk_mask_layer.allocate_inference_cache(
         batch_size=batch_size,
         max_seqlen=seqlen + 10,
@@ -212,7 +224,7 @@ def test_dechunk_mask_layer_step():
 
     mask_score = de_chunk_mask_layer.forward(
         boundary_mask=boundary_mask,
-        block_score=block_score,
+        chunk_attn_score=block_score,
         mask=mask,
         inference_params=inference_params,
     )
@@ -236,7 +248,7 @@ def test_dechunk_mask_layer_step():
         )
         mask_score = de_chunk_mask_layer.step(
             boundary_mask=boundary_mask,
-            block_score=block_score,
+            chunk_attn_score=block_score,
             inference_params=inference_params,
         )
 

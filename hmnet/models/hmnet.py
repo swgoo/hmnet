@@ -15,10 +15,10 @@ from hnet.modules.dc import (
 from hnet.modules.isotropic import IsotropicInferenceParams
 
 from ..modules.dm import (
-    DeChunkMaskLayer,
-    DeChunkMaskState,
-    MaskingModule,
-    MaskingModuleState,
+    DeChunkAttnScoreLayer,
+    DeChunkAttnScoreState,
+    ChunkAttnScoreModule,
+    ChunkAttnScoreState,
 )
 from ..modules.isotropic import Isotropic
 from ..modules.utils import ste_func
@@ -31,8 +31,8 @@ class HMNetState:
     main_network_state: Optional[Union["HMNetState", IsotropicInferenceParams]] = None
     dechunk_state: Optional[DeChunkState] = None
     decoder_state: Optional[IsotropicInferenceParams] = None
-    masking_state: Optional[MaskingModuleState] = None
-    dechunk_mask_state: Optional[DeChunkMaskState] = None
+    chunk_attn_score_state: Optional[ChunkAttnScoreState] = None
+    dechunk_attn_score_state: Optional[DeChunkAttnScoreState] = None
 
 
 class HMNet(nn.Module):
@@ -48,7 +48,6 @@ class HMNet(nn.Module):
 
         self.stage_idx = stage_idx
         self.d_model = config.d_model[stage_idx]
-        # self.window_size = config.attn_cfg.window_size[stage_idx]
 
         arch_layout = config.arch_layout
         for _ in range(stage_idx):
@@ -90,12 +89,13 @@ class HMNet(nn.Module):
             self.routing_module = RoutingModule(self.d_model, **factory_kwargs)
             self.chunk_layer = ChunkLayer()
             self.dechunk_layer = DeChunkLayer(self.d_model)
-            self.dechunk_mask_layer = DeChunkMaskLayer(
+            self.dechunk_attn_score_layer = DeChunkAttnScoreLayer(
                 config.decoder_attn_cfg.window_size[stage_idx]
             )
-            self.masking_module = MaskingModule(self.d_model, **factory_kwargs)
+            self.chunk_attn_score_module = ChunkAttnScoreModule(
+                self.d_model, **factory_kwargs
+            )
 
-            # do the residual in fp32
             self.residual_proj = nn.Linear(
                 self.d_model, self.d_model, device=device, dtype=torch.float32
             )
@@ -113,22 +113,6 @@ class HMNet(nn.Module):
             self.pad_dimension = None
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None):
-        """
-        Allocate the inference cache for the HNet.
-
-        Arguments:
-            batch_size: int. The number of sequences in the batch.
-            max_seqlen: int. The maximum sequence length in the batch.
-            dtype: torch.dtype. The dtype of the inference cache.
-
-        The structure of the inference cache is as follows:
-            - [encoder state]
-            - [routing module state]
-            - [main network state]
-            - [dechunk state]
-            - [decoder state]
-        It is thus a list of length 5.
-        """
         if self.is_innermost:
             hmnet_state = HMNetState(
                 main_network_state=self.main_network.allocate_inference_cache(
@@ -153,10 +137,10 @@ class HMNet(nn.Module):
                 decoder_state=self.decoder.allocate_inference_cache(
                     batch_size, max_seqlen, dtype=dtype
                 ),
-                masking_state=self.masking_module.allocate_inference_cache(
+                chunk_attn_score_state=self.chunk_attn_score_module.allocate_inference_cache(
                     batch_size, max_seqlen, device, dtype=dtype
                 ),
-                dechunk_mask_state=self.dechunk_mask_layer.allocate_inference_cache(
+                dechunk_attn_score_state=self.dechunk_attn_score_layer.allocate_inference_cache(
                     batch_size, max_seqlen, device, dtype=dtype
                 ),
             )
@@ -226,7 +210,7 @@ class HMNet(nn.Module):
             hidden_states, bpred_output.boundary_mask, cu_seqlens, mask=mask
         )
 
-        hidden_states, prev_boundary_predictions, prev_mask_predictions = (
+        hidden_states, prev_boundary_predictions, prev_chunk_attn_scores = (
             self.main_network(
                 hidden_states,
                 cu_seqlens=next_cu_seqlens,
@@ -237,8 +221,8 @@ class HMNet(nn.Module):
             )
         )
 
-        mask_prediction = self.masking_module(
-            hidden_states, inference_params.masking_state
+        chunk_attn_score = self.chunk_attn_score_module(
+            hidden_states, inference_params.chunk_attn_score_state
         )
 
         hidden_states = self.dechunk_layer(
@@ -256,11 +240,11 @@ class HMNet(nn.Module):
             bpred_output.selected_probs,
         ).to(hidden_states.dtype)
 
-        masking_score = self.dechunk_mask_layer(
+        mask_score = self.dechunk_attn_score_layer(
             boundary_mask=bpred_output.boundary_mask,
-            block_score=mask_prediction,
+            chunk_attn_score=chunk_attn_score,
             mask=mask,
-            inference_params=inference_params.dechunk_mask_state,
+            inference_params=inference_params.dechunk_attn_score_state,
         )
 
         hidden_states = self.decoder(
@@ -269,7 +253,7 @@ class HMNet(nn.Module):
             max_seqlen=max_seqlen,
             mask=mask,
             inference_params=inference_params.decoder_state,
-            masking_score=masking_score,
+            mask_score=mask_score,
             **mixer_kwargs,
         )
 
@@ -278,7 +262,7 @@ class HMNet(nn.Module):
         return (
             hidden_states,
             [bpred_output, *prev_boundary_predictions],
-            [mask_prediction, *prev_mask_predictions],
+            [chunk_attn_score, *prev_chunk_attn_scores],
         )
 
     def step(self, hidden_states: torch.Tensor, inference_params: HMNetState):
@@ -314,14 +298,18 @@ class HMNet(nn.Module):
         )
 
         if hidden_states_inner.shape[0] > 0:
-            hidden_states_inner, prev_boundary_predictions, prev_mask_predictions = (
+            hidden_states_inner, prev_boundary_predictions, prev_chunk_attn_scores = (
                 self.main_network.step(
                     hidden_states_inner, inference_params.main_network_state
                 )
             )
         else:
             prev_boundary_predictions = []
-            prev_mask_predictions = []
+            prev_chunk_attn_scores = []
+
+        chunk_attn_score = self.chunk_attn_score_module.step(
+            hidden_states_inner, inference_params.chunk_attn_score_state
+        )
 
         hidden_states = self.dechunk_layer.step(
             hidden_states_inner,
@@ -330,24 +318,21 @@ class HMNet(nn.Module):
             inference_params.dechunk_state,
         )
 
-        mask_prediction = self.masking_module.step(
-            hidden_states_inner, inference_params.masking_state
-        )
-
         hidden_states = self.residual_func(
             hidden_states.to(dtype=residual.dtype),
             residual,
             bpred_output.selected_probs,
         ).to(hidden_states.dtype)
-        masking_score = self.dechunk_mask_layer.step(
+
+        mask_score = self.dechunk_attn_score_layer.step(
             boundary_mask=bpred_output.boundary_mask,
-            block_score=mask_prediction,
-            inference_params=inference_params.dechunk_mask_state,
+            chunk_attn_score=chunk_attn_score,
+            inference_params=inference_params.dechunk_attn_score_state,
         )
         hidden_states = self.decoder.step(
             hidden_states,
             inference_params.decoder_state,
-            masking_score=masking_score,
+            mask_score=mask_score,
         )
 
         hidden_states = hidden_states[..., :D]
@@ -355,5 +340,5 @@ class HMNet(nn.Module):
         return (
             hidden_states,
             [bpred_output, *prev_boundary_predictions],
-            [mask_prediction, *prev_mask_predictions],
+            [chunk_attn_score, *prev_chunk_attn_scores],
         )

@@ -97,7 +97,7 @@ class Block(HNetBlock):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
         inference_params=None,
-        masking_score=None,
+        mask_score=None,
         mixer_kwargs=None,
     ):
         hidden_states, residual = self.norm1(
@@ -112,7 +112,7 @@ class Block(HNetBlock):
         hidden_states = self.mixer(
             hidden_states,
             inference_params=inference_params,
-            masking_score=masking_score,
+            mask_score=mask_score,
             **mixer_kwargs,
         )
 

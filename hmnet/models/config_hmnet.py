@@ -11,8 +11,8 @@ class HMNetConfig:
     d_intermediate: List[int] = field(default_factory=list)
     vocab_size: int = 256
     encoder_ssm_cfg: SSMConfig = field(default_factory=SSMConfig)
-    decoder_ssm_cfg: SSMConfig = field(default_factory=SSMConfig)
     encoder_attn_cfg: AttnConfig = field(default_factory=AttnConfig)
+    decoder_ssm_cfg: SSMConfig = field(default_factory=SSMConfig)
     decoder_attn_cfg: AttnConfig = field(default_factory=AttnConfig)
     tie_embeddings: bool = False
 

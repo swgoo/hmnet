@@ -57,7 +57,7 @@ class Isotropic(HNetIsotropic):
         hidden_states,
         cu_seqlens=None,
         max_seqlen=None,
-        masking_score=None,
+        mask_score=None,
         mask=None,
         inference_params=None,
         **mixer_kwargs,
@@ -101,7 +101,7 @@ class Isotropic(HNetIsotropic):
             hidden_states, residual = layer(
                 hidden_states,
                 residual,
-                masking_score=masking_score,
+                mask_score=mask_score,
                 inference_params=inference_params,
                 mixer_kwargs=layer_mixer_kwargs,
             )
@@ -121,7 +121,7 @@ class Isotropic(HNetIsotropic):
 
         return hidden_states
 
-    def step(self, hidden_states, inference_params, masking_score=None, **kwargs):
+    def step(self, hidden_states, inference_params, mask_score=None, **kwargs):
         """
         Assumes hidden_states is (B, 1, D). Steps each of the layers in order, and then steps the main model.
         """
@@ -132,7 +132,7 @@ class Isotropic(HNetIsotropic):
                 hidden_states,
                 inference_params,
                 residual=residual,
-                masking_score=masking_score,
+                mask_score=mask_score,
                 **kwargs,
             )
 
