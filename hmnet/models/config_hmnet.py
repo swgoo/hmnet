@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, List, Union
+from typing import Any, List
 from hnet.models.config_hnet import SSMConfig, AttnConfig, HNetConfig
 
 
@@ -15,6 +15,18 @@ class HMNetConfig:
     decoder_ssm_cfg: SSMConfig = field(default_factory=SSMConfig)
     decoder_attn_cfg: AttnConfig = field(default_factory=AttnConfig)
     tie_embeddings: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "HMNetConfig":
+        cfg = dict(data)  # shallow copy
+
+        # pop & instantiate nested configs
+        cfg["encoder_ssm_cfg"] = SSMConfig(**cfg.pop("encoder_ssm_cfg", {}))
+        cfg["encoder_attn_cfg"] = AttnConfig(**cfg.pop("encoder_attn_cfg", {}))
+        cfg["decoder_ssm_cfg"] = SSMConfig(**cfg.pop("decoder_ssm_cfg", {}))
+        cfg["decoder_attn_cfg"] = AttnConfig(**cfg.pop("decoder_attn_cfg", {}))
+
+        return cls(**cfg)
 
     def encoder_hnet_config(self):
         return HNetConfig(

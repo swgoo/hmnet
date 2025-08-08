@@ -96,8 +96,9 @@ class Block(HNetBlock):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
+        block_mask=None,
+        score_mod=None,
         inference_params=None,
-        mask_score=None,
         mixer_kwargs=None,
     ):
         hidden_states, residual = self.norm1(
@@ -112,7 +113,8 @@ class Block(HNetBlock):
         hidden_states = self.mixer(
             hidden_states,
             inference_params=inference_params,
-            mask_score=mask_score,
+            block_mask=block_mask,
+            score_mod=score_mod,
             **mixer_kwargs,
         )
 
@@ -127,14 +129,24 @@ class Block(HNetBlock):
 
         return hidden_states, residual
 
-    def step(self, hidden_states, inference_params, residual=None, **kwargs):
+    def step(
+        self,
+        hidden_states,
+        inference_params=None,
+        residual=None,
+        **kwargs,
+    ):
         hidden_states, residual = self.norm1(
             hidden_states,
             residual=residual,
             prenorm=True,
             residual_in_fp32=self.residual_in_fp32,
         )
-        hidden_states = self.mixer.step(hidden_states, inference_params, **kwargs)
+        hidden_states = self.mixer.step(
+            hidden_states,
+            inference_params=inference_params,
+            **kwargs,
+        )
         if self.mlp is not None:
             hidden_states, residual = self.norm2(
                 hidden_states,

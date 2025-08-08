@@ -5,6 +5,9 @@ import torch
 import torch.nn.functional as F
 from einops import einsum, rearrange
 from torch import Tensor, nn
+from torch.nn.attention.flex_attention import create_block_mask
+
+from .utils import ste_func
 
 
 @dataclass
@@ -24,6 +27,14 @@ class ChunkAttnScoreState:
             self.key_memory.zero_()
         if self.last_query is not None:
             self.last_query.zero_()
+
+    @property
+    def last_key(self):
+        if self.key_memory is not None:
+            batch_start = self.batch_size_offset
+            batch_end = batch_start + self.key_memory.shape[0]
+            return self.key_memory[batch_start:batch_end, : self.seqlen_offset, :]
+        return None
 
 
 def _update_k_cache(k: Tensor, inference_params: ChunkAttnScoreState):
@@ -62,13 +73,12 @@ class ChunkAttnScoreModule(nn.Module):
         device=None,
         dtype=None,
     ):
+        super().__init__()
         self.d_model = d_model
         self.softmax_scale = (
             softmax_scale if softmax_scale is not None else 1.0 / np.sqrt(d_model)
         )
-
         factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__()
         self.Wqk = nn.Linear(d_model, 2 * d_model, bias=False, **factory_kwargs)
 
     def allocate_inference_cache(
@@ -92,23 +102,6 @@ class ChunkAttnScoreModule(nn.Module):
         """Update the key cache with the new k tensor."""
         return _update_k_cache(k, inference_params)
 
-    def forward(
-        self,
-        hidden_states: Tensor,
-        inference_params: ChunkAttnScoreState | None = None,
-        **kwargs,
-    ):
-
-        q, k = self._project(hidden_states)
-        attn_score = self._attention_score(q, k)
-
-        if inference_params is not None:
-            self._update_k_cache(k, inference_params)
-            inference_params.seqlen_offset += int(k.shape[-2])
-            inference_params.last_query = q[:, -1, :]
-
-        return attn_score
-
     def _project(self, hidden_states: Tensor):
         """Project hidden states to query and key tensors."""
         qk = self.Wqk(hidden_states)
@@ -125,6 +118,18 @@ class ChunkAttnScoreModule(nn.Module):
         attn_score = torch.softmax(attn_score * self.softmax_scale, dim=-1)
         return attn_score
 
+    def forward(
+        self,
+        hidden_states: Tensor,
+        inference_params: ChunkAttnScoreState | None = None,
+    ):
+        q, k = self._project(hidden_states)
+        if inference_params is not None:
+            self._update_k_cache(k, inference_params)
+            inference_params.seqlen_offset += int(k.shape[-2])
+            inference_params.last_query = q[:, -1, :]
+        return self._attention_score(q, k)
+
     def step(self, hidden_states: Tensor, inference_params: ChunkAttnScoreState):
         if hidden_states.shape[0] > 0:
             q, k = self._project(hidden_states)
@@ -133,17 +138,8 @@ class ChunkAttnScoreModule(nn.Module):
             inference_params.seqlen_offset += 1
         else:
             q = inference_params.last_query.unsqueeze(-2)
-            batch_start = inference_params.batch_size_offset
-            batch_end = batch_start + q.shape[0]
-            k_cache = inference_params.key_memory[
-                batch_start:batch_end, : inference_params.seqlen_offset, :
-            ]
-
-        chunk_attn_score = self._attention_score(
-            q.to(device=hidden_states.device),
-            k_cache.to(device=hidden_states.device),
-        )
-        return chunk_attn_score
+            k_cache = inference_params.last_key
+        return self._attention_score(q, k_cache)
 
 
 @dataclass
@@ -176,7 +172,7 @@ class DeChunkAttnScoreLayer(nn.Module):
         cu_seqlens=None,
         mask=None,
         inference_params: DeChunkAttnScoreState | None = None,
-    ) -> Tensor:
+    ):
 
         if inference_params is None:
             assert (
@@ -193,7 +189,7 @@ class DeChunkAttnScoreLayer(nn.Module):
 
         chunk_attn_score = torch.clamp(chunk_attn_score, min=1e-4, max=1.0 - 1e-4)
 
-        plug_back_idx = torch.cumsum(boundary_mask.to(torch.int64), dim=1) - 1  # (B, L)
+        plug_back_idx = torch.cumsum(boundary_mask.long(), dim=-1) - 1  # (B, L)
         selected_queries = torch.gather(
             chunk_attn_score,
             dim=-2,
@@ -212,19 +208,14 @@ class DeChunkAttnScoreLayer(nn.Module):
             inference_params.last_mask_score = mask_score[..., -1, :]
             inference_params.last_boundary_mask = boundary_mask
 
-        return mask_score
+        return self.create_masks(mask_score)
 
     def step(
         self,
         boundary_mask: Tensor,
         chunk_attn_score: Tensor,
         inference_params: DeChunkAttnScoreState,
-    ) -> Tensor:
-        prev_mask = inference_params.last_mask_score.unsqueeze(-2)  # (B, 1, seq_len)
-        current_mask_score = torch.cat(
-            [prev_mask, prev_mask[..., -1:]], dim=-1
-        )  # (B, 1, seq_len+1)
-
+    ):
         current_boundary_mask = torch.concat(
             [
                 inference_params.last_boundary_mask,
@@ -233,19 +224,18 @@ class DeChunkAttnScoreLayer(nn.Module):
             dim=-1,
         )
 
-        if boundary_mask.sum() > 0:
-            current_block_score = torch.zeros_like(
-                current_boundary_mask,
-                dtype=chunk_attn_score.dtype,
-                device=chunk_attn_score.device,
-            ).unsqueeze(-2)
-            current_block_score[..., : chunk_attn_score.shape[-1]] = chunk_attn_score
+        prev_mask_score = inference_params.last_mask_score.unsqueeze(
+            -2
+        )  # (B, 1, seq_len)
+        current_mask_score = torch.cat(
+            [prev_mask_score, prev_mask_score[..., -1:]], dim=-1
+        )  # (B, 1, seq_len+1)
 
-            plug_back_idx = (
-                torch.cumsum(current_boundary_mask.to(torch.int64), dim=-1) - 1
-            )
+        if boundary_mask.sum() > 0:
+            current_mask_score[..., : chunk_attn_score.shape[-1]] = chunk_attn_score
+            plug_back_idx = torch.cumsum(current_boundary_mask.long(), dim=-1) - 1
             current_mask_score = torch.gather(
-                current_block_score,
+                current_mask_score,
                 dim=-1,
                 index=plug_back_idx.unsqueeze(-2),
             )
@@ -253,4 +243,64 @@ class DeChunkAttnScoreLayer(nn.Module):
         inference_params.last_mask_score = current_mask_score[..., -1, :]
         inference_params.last_boundary_mask = current_boundary_mask
 
-        return current_mask_score
+        return self.create_masks(current_mask_score)
+
+    def _create_chunk_causal_window_mask(self, mask):
+        batch_size = mask.shape[0]
+        q_len = mask.shape[-2]
+        kv_len = mask.shape[-1]
+        device = mask.device
+
+        if q_len == 1:
+            if self.window_size == -1:
+                window_mask = torch.ones(1, kv_len, device=device, dtype=torch.bool)
+            elif self.window_size > 0:
+                window_mask = torch.zeros(1, kv_len, device=device, dtype=torch.bool)
+                start = max(0, kv_len - int(self.window_size))
+                if start < kv_len:
+                    window_mask[:, start:] = True
+            else:
+                raise ValueError("window_size must be -1 or >= 0")
+        elif q_len != 1 and kv_len != 1:
+            q_idx = torch.arange(q_len, device=device).unsqueeze(-1)
+            kv_idx = torch.arange(kv_len, device=device).unsqueeze(-2)
+            if self.window_size == -1:
+                window_mask = q_idx >= kv_idx
+            elif self.window_size > 0:
+                diff = q_idx - kv_idx
+                window_mask = (diff >= 0) & (diff < self.window_size)
+            else:
+                raise ValueError("window_size must be -1 or >= 0")
+        else:
+            raise ValueError(
+                "Invalid combination of q_seq_len, kv_seq_len, and window_size"
+            )
+        final_mask = mask & window_mask.unsqueeze(0)  # [batch, q_seq_len, kv_seq_len]
+
+        return create_block_mask(
+            lambda b, h, q_idx, kv_idx: final_mask[b, q_idx, kv_idx],
+            B=batch_size,
+            H=1,
+            Q_LEN=q_len,
+            KV_LEN=kv_len,
+        )
+
+    def _create_score_mod(self, mask_score):
+        return lambda score, b, h, q_idx, kv_idx: score * mask_score[b, q_idx, kv_idx]
+
+    def create_masks(self, mask_score: Tensor):
+        if mask_score is None:
+            return None, None
+        elif mask_score.dtype == torch.bool:
+            mask = mask_score
+            score_mod = None
+        else:
+            mask = mask_score > self.threshold
+            masking_confidence = torch.where(
+                mask_score > self.threshold, mask_score, 1 - mask_score
+            )
+            masking_confidence = ste_func(masking_confidence, threshold=self.threshold)
+            score_mod = self._create_score_mod(masking_confidence)
+
+        block_mask = self._create_chunk_causal_window_mask(mask)
+        return score_mod, block_mask

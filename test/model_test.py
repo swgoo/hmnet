@@ -29,24 +29,24 @@ def test_hmnet():
 
     # torch.cuda.empty_cache()
     model = HMNet(config=config, device="cuda", stage_idx=0)
+    for _ in range(10):
+        input_tensor = torch.randn(
+            batch_size,
+            seqlen,
+            config.d_model[0],
+            device="cuda",
+        )
+        mask = torch.ones(batch_size, seqlen, dtype=torch.bool, device="cuda")
+        output = model(hidden_states=input_tensor, mask=mask)
 
-    input_tensor = torch.randn(
-        batch_size,
-        seqlen,
-        config.d_model[0],
-        device="cuda",
-    )
-    mask = torch.ones(batch_size, seqlen, dtype=torch.bool, device="cuda")
-    output = model(hidden_states=input_tensor, mask=mask)
-
-    assert output[0].shape == (batch_size, seqlen, config.d_model[0])
+        assert output[0].shape == (batch_size, seqlen, config.d_model[0])
 
 
 @torch.no_grad()
 def test_step():
     ssm_config = SSMConfig(chunk_size=256, d_conv=8, d_state=128, expand=2)
     attn_config = AttnConfig(
-        num_heads=[16, 16], rotary_emb_dim=[4, 4], window_size=[1023, -1]
+        num_heads=[16, 16], rotary_emb_dim=[4, 4], window_size=[3, -1]
     )
     config = HMNetConfig(
         d_model=[64, 128],
@@ -63,7 +63,7 @@ def test_step():
 
     # Test step method
     batch_size = 1
-    seqlen = 20
+    seqlen = 10
     input_tensor = torch.randn(
         batch_size,
         seqlen,
@@ -71,13 +71,13 @@ def test_step():
         device="cuda",
         dtype=torch.float32,
     )
-    inference_params = model.allocate_inference_cache(batch_size, seqlen + 100)
+    inference_params = model.allocate_inference_cache(batch_size, seqlen + 150)
 
     mask = torch.ones(batch_size, seqlen, device="cuda", dtype=torch.bool)
     output = model.forward(
         hidden_states=input_tensor, mask=mask, inference_params=inference_params
     )
-    for _ in tqdm(range(2)):
+    for _ in tqdm(range(30)):
 
         current_emb = torch.randn(
             batch_size, 1, config.d_model[0], device="cuda", dtype=torch.float32

@@ -3,7 +3,6 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-from hnet.models.config_hnet import HNetConfig
 from .config_hmnet import HMNetConfig
 from hnet.modules.dc import (
     ChunkLayer,
@@ -39,7 +38,7 @@ class HMNet(nn.Module):
     def __init__(
         self,
         config: HMNetConfig,
-        stage_idx: int,
+        stage_idx: int = 0,
         device=None,
         dtype=None,
     ) -> None:
@@ -90,7 +89,7 @@ class HMNet(nn.Module):
             self.chunk_layer = ChunkLayer()
             self.dechunk_layer = DeChunkLayer(self.d_model)
             self.dechunk_attn_score_layer = DeChunkAttnScoreLayer(
-                config.decoder_attn_cfg.window_size[stage_idx]
+                window_size=config.decoder_attn_cfg.window_size[stage_idx]
             )
             self.chunk_attn_score_module = ChunkAttnScoreModule(
                 self.d_model, **factory_kwargs
@@ -171,7 +170,7 @@ class HMNet(nn.Module):
 
         if self.pad_dimension is not None:
             hidden_states = torch.cat(
-                (hidden_states, self.pad_dimension.expand(EARLY_DIMS + (-1,))), dim=-1
+                (hidden_states, self.pad_dimension.expand(*EARLY_DIMS, -1)), dim=-1
             )
 
         if self.is_innermost:
@@ -240,7 +239,7 @@ class HMNet(nn.Module):
             bpred_output.selected_probs,
         ).to(hidden_states.dtype)
 
-        mask_score = self.dechunk_attn_score_layer(
+        score_mod, block_mask = self.dechunk_attn_score_layer(
             boundary_mask=bpred_output.boundary_mask,
             chunk_attn_score=chunk_attn_score,
             mask=mask,
@@ -253,7 +252,8 @@ class HMNet(nn.Module):
             max_seqlen=max_seqlen,
             mask=mask,
             inference_params=inference_params.decoder_state,
-            mask_score=mask_score,
+            block_mask=block_mask,
+            score_mod=score_mod,
             **mixer_kwargs,
         )
 
@@ -272,7 +272,7 @@ class HMNet(nn.Module):
             hidden_states = torch.cat(
                 (
                     hidden_states,
-                    self.pad_dimension.expand(hidden_states.shape[:-1] + (-1,)),
+                    self.pad_dimension.expand(*hidden_states.shape[:-1], -1),
                 ),
                 dim=-1,
             )
@@ -324,7 +324,7 @@ class HMNet(nn.Module):
             bpred_output.selected_probs,
         ).to(hidden_states.dtype)
 
-        mask_score = self.dechunk_attn_score_layer.step(
+        score_mod, block_mask = self.dechunk_attn_score_layer.step(
             boundary_mask=bpred_output.boundary_mask,
             chunk_attn_score=chunk_attn_score,
             inference_params=inference_params.dechunk_attn_score_state,
@@ -332,7 +332,8 @@ class HMNet(nn.Module):
         hidden_states = self.decoder.step(
             hidden_states,
             inference_params.decoder_state,
-            mask_score=mask_score,
+            block_mask=block_mask,
+            score_mod=score_mod,
         )
 
         hidden_states = hidden_states[..., :D]

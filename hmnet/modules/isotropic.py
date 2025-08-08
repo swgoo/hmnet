@@ -1,5 +1,6 @@
 import re
 
+import torch
 import torch.nn as nn
 from flash_attn.ops.triton.layer_norm import RMSNorm
 from hnet.modules.isotropic import Isotropic as HNetIsotropic
@@ -57,7 +58,8 @@ class Isotropic(HNetIsotropic):
         hidden_states,
         cu_seqlens=None,
         max_seqlen=None,
-        mask_score=None,
+        block_mask=None,
+        score_mod=None,
         mask=None,
         inference_params=None,
         **mixer_kwargs,
@@ -101,7 +103,8 @@ class Isotropic(HNetIsotropic):
             hidden_states, residual = layer(
                 hidden_states,
                 residual,
-                mask_score=mask_score,
+                block_mask=block_mask,
+                score_mod=score_mod,
                 inference_params=inference_params,
                 mixer_kwargs=layer_mixer_kwargs,
             )
@@ -121,7 +124,7 @@ class Isotropic(HNetIsotropic):
 
         return hidden_states
 
-    def step(self, hidden_states, inference_params, mask_score=None, **kwargs):
+    def step(self, hidden_states, inference_params, **kwargs):
         """
         Assumes hidden_states is (B, 1, D). Steps each of the layers in order, and then steps the main model.
         """
@@ -132,7 +135,6 @@ class Isotropic(HNetIsotropic):
                 hidden_states,
                 inference_params,
                 residual=residual,
-                mask_score=mask_score,
                 **kwargs,
             )
 
