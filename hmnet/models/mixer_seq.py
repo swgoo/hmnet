@@ -3,26 +3,26 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-
 from flash_attn.utils.generation import GenerationMixin
-
-from .hmnet import HMNet, HMNetState
-from hnet.models.config_hnet import HNetConfig
-
 from hnet.modules.dc import RoutingModuleOutput
+from torch import Tensor
+
+from .config_hmnet import HMNetConfig
+from .hmnet import HMNet, HMNetState
 
 
 @dataclass
 class CausalLMOutput:
     logits: torch.Tensor
     bpred_output: list[RoutingModuleOutput]
-    inference_params: HMNetState
+    chunk_attn_score_output: list[Tensor]
+    inference_params: HMNetState | None
 
 
 class HMNetForCausalLM(nn.Module, GenerationMixin):
     def __init__(
         self,
-        config: HNetConfig,
+        config: HMNetConfig,
         device=None,
         dtype=None,
     ) -> None:
@@ -42,7 +42,6 @@ class HMNetForCausalLM(nn.Module, GenerationMixin):
             config=config,
             # We pass in the stage_idx as an HNet needs to know what
             # depth of the hierarchy it is in.
-            stage_idx=0,
             **factory_kwargs,
         )
         self.lm_head = nn.Linear(d_embed, vocab_size, bias=False, **factory_kwargs)
@@ -89,7 +88,7 @@ class HMNetForCausalLM(nn.Module, GenerationMixin):
             cu_seqlens = None
             max_seqlen = None
 
-        hidden_states, bpred_output = self.backbone(
+        hidden_states, bpred_output, chunk_attn_score_output = self.backbone(
             hidden_states,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
@@ -104,12 +103,10 @@ class HMNetForCausalLM(nn.Module, GenerationMixin):
             hidden_states = hidden_states[:, -num_last_tokens:]
         lm_logits = self.lm_head(hidden_states)
 
-        CausalLMOutput = namedtuple(
-            "CausalLMOutput", ["logits", "bpred_output", "inference_params"]
-        )
         return CausalLMOutput(
             logits=lm_logits,
             bpred_output=bpred_output,
+            chunk_attn_score_output=chunk_attn_score_output,
             inference_params=inference_params,
         )
 
@@ -121,11 +118,14 @@ class HMNetForCausalLM(nn.Module, GenerationMixin):
 
         hidden_states = self.embeddings(input_ids)
 
-        hidden_states, bpred_output, block_score_prediction = self.backbone.step(
+        hidden_states, bpred_output, chunk_attn_score_output = self.backbone.step(
             hidden_states, inference_params
         )
         logits = self.lm_head(hidden_states)
 
         return CausalLMOutput(
-            logits=logits, bpred_output=bpred_output, inference_params=inference_params
+            logits=logits,
+            bpred_output=bpred_output,
+            chunk_attn_score_output=chunk_attn_score_output,
+            inference_params=inference_params,
         )
