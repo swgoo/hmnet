@@ -20,4 +20,4 @@ encoder_attn_cfg:
 decoder_attn_cfg:
   num_heads: [4, 4, 4]
   rotary_emb_dim: [16, 32, 64]
-  window_size: [1023, -1, -1]
+  window_size: [-1, -1, 1023]

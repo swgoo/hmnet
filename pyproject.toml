@@ -1,11 +1,9 @@
 [project]
-name = "hnet"
+name = "hmnet"
 version = "0.0.1"
-description = "H-Net"
+description = "HM-Net"
 authors = [
-    { name = "Sukjun Hwang", email = "sukjunh@cs.cmu.edu" },
-    { name = "Brandon Wang", email = "brandon.wang@cartesia.ai"},
-    { name = "Albert Gu", email = "agu@cs.cmu.edu" },
+    { name = "Sungwoo Goo", email = "swgoo91@gmail.com" },
 ]
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -13,20 +11,20 @@ requires-python = ">=3.9"
 dependencies = [
     "torch>=2.5.1",
     "triton>=3.2.0",
-    "mamba_ssm @ git+https://github.com/state-spaces/mamba.git@a6a1dae6efbf804c9944a0c2282b437deb4886d8",
-    "flash_attn==2.8.0.post2",
-    "causal_conv1d @ git+https://github.com/Dao-AILab/causal-conv1d.git@e940ead2fd962c56854455017541384909ca669f",
+    "flash_attn>=2.8.2",
+    "causal-conv1d>=1.5.2",
+    "mamba-ssm>=2.2.5",
     "einops",
     "optree",
     "regex",
     "omegaconf",
 ]
 [project.urls]
-Repository = "https://github.com/goombalab/"
+Repository = "https://github.com/swgoo/hmnet"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["hnet*"]
+include = ["hmnet*"]
 exclude = ["tests*"]
 
 [build-system]

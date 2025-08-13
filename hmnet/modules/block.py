@@ -2,8 +2,7 @@ from functools import partial
 
 import torch
 from flash_attn.ops.triton.layer_norm import RMSNorm
-from hnet.modules.block import Block as HNetBlock
-from hnet.modules.mlp import SwiGLU
+from .mlp import SwiGLU
 from mamba_ssm.modules.mamba2 import Mamba2
 from torch import nn
 
@@ -91,7 +90,28 @@ def create_block(
     return block
 
 
-class Block(HNetBlock):
+class Block(nn.Module):
+    def __init__(
+        self,
+        d_model,
+        mixer_cls=None,
+        mlp_cls=None,
+        norm_cls=None,
+        residual_in_fp32=True,
+    ):
+        super().__init__()
+        self.residual_in_fp32 = residual_in_fp32
+        self.norm1 = norm_cls(d_model)
+        self.mixer = mixer_cls(d_model)
+        if mlp_cls is not nn.Identity:
+            self.norm2 = norm_cls(d_model)
+            self.mlp = mlp_cls(d_model)
+        else:
+            self.mlp = None
+
+        assert RMSNorm is not None, "Triton is not installed"
+        assert isinstance(self.norm1, RMSNorm), "Only RMSNorm is supported"
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -128,6 +148,11 @@ class Block(HNetBlock):
             hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
+
+    def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
+        return self.mixer.allocate_inference_cache(
+            batch_size, max_seqlen, dtype=dtype, **kwargs
+        )
 
     def step(
         self,

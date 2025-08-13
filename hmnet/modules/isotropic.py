@@ -1,16 +1,42 @@
+from dataclasses import dataclass, field
 import re
+from typing import Optional
 
+import optree
 import torch
 import torch.nn as nn
 from flash_attn.ops.triton.layer_norm import RMSNorm
-from hnet.modules.isotropic import Isotropic as HNetIsotropic
-from hnet.models.config_hnet import HNetConfig
+from ..models.config_hnet import HNetConfig
 from .block import create_block
-from hnet.modules.utils import get_seq_idx
+from .utils import get_seq_idx, get_stage_cfg
 from copy import deepcopy
 
+@dataclass
+class IsotropicInferenceParams:
+    """Inference parameters that are passed to the main model in order
+    to efficienly calculate and store the context during inference."""
 
-class Isotropic(HNetIsotropic):
+    max_seqlen: int
+    max_batch_size: int
+    seqlen_offset: int = 0
+    batch_size_offset: int = 0
+    key_value_memory_dict: dict = field(default_factory=dict)
+    lengths_per_sample: Optional[torch.Tensor] = None
+
+    def reset(self, max_seqlen, max_batch_size):
+        self.max_seqlen = max_seqlen
+        self.max_batch_size = max_batch_size
+        self.seqlen_offset = 0
+        if self.lengths_per_sample is not None:
+            self.lengths_per_sample.zero_()
+
+        optree.tree_map(
+            lambda x: x.zero_() if isinstance(x, torch.Tensor) else x,
+            self.key_value_memory_dict,
+        )
+
+
+class Isotropic(nn.Module):
     def __init__(
         self,
         config: HNetConfig,
@@ -20,7 +46,12 @@ class Isotropic(HNetIsotropic):
         dtype=None,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__(config, pos_idx, stage_idx, **factory_kwargs)
+        super().__init__()
+
+        self.stage_idx = stage_idx
+        self.d_model = config.d_model[self.stage_idx]
+        self.ssm_cfg = get_stage_cfg(config.ssm_cfg, stage_idx)
+        self.attn_cfg = get_stage_cfg(config.attn_cfg, stage_idx)
 
         arch_layout = config.arch_layout
         for _ in range(stage_idx):
@@ -31,6 +62,8 @@ class Isotropic(HNetIsotropic):
         layers = []
         layer_idx = 0
         self.arch_full = []
+
+        self.height = 0
         for arch, n_layer in layout_parse:
             assert arch in ("m", "M", "t", "T")
             assert n_layer.isdigit()
@@ -46,12 +79,38 @@ class Isotropic(HNetIsotropic):
                 )
                 for i in range(int(n_layer))
             ]
+            if arch.islower():
+                self.height += int(n_layer)
+            else:
+                self.height += 2 * int(n_layer)
             self.arch_full.extend([arch for _ in range(int(n_layer))])
             layer_idx += int(n_layer)
 
         self.layers = nn.ModuleList(layers)
 
         self.rmsnorm = RMSNorm(self.d_model, eps=1e-5, **factory_kwargs)
+    
+    def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None):
+        """
+        Allocate the inference cache for the Isotropic module.
+
+        Arguments:
+            batch_size: int. The number of sequences in the batch.
+            max_seqlen: int. The maximum sequence length in the batch, not used for this module.
+            dtype: torch.dtype. The dtype of the inference cache.
+
+        The inference cache contains a list of inference caches, one for each block.
+        """
+        key_value_memory_dict = {}
+        for i, layer in enumerate(self.layers):
+            key_value_memory_dict[i] = layer.allocate_inference_cache(
+                batch_size, max_seqlen, dtype=dtype
+            )
+        return IsotropicInferenceParams(
+            key_value_memory_dict=key_value_memory_dict,
+            max_seqlen=max_seqlen,
+            max_batch_size=batch_size,
+        )
 
     def forward(
         self,

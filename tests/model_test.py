@@ -1,7 +1,7 @@
 import torch
 from hmnet.models.config_hmnet import HMNetConfig
 from hmnet.models.hmnet import HMNet
-from hnet.models.config_hnet import SSMConfig, AttnConfig
+from hmnet.models.config_hnet import SSMConfig, AttnConfig
 from tqdm import tqdm
 
 

@@ -4,14 +4,14 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 from .config_hmnet import HMNetConfig
-from hnet.modules.dc import (
+from ..modules.dc import (
     ChunkLayer,
     DeChunkLayer,
     DeChunkState,
     RoutingModule,
     RoutingModuleState,
 )
-from hnet.modules.isotropic import IsotropicInferenceParams
+from ..modules.isotropic import IsotropicInferenceParams
 
 from ..modules.dm import (
     DeChunkAttnScoreLayer,

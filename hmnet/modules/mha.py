@@ -2,11 +2,36 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from einops import rearrange
-from hnet.modules.isotropic import IsotropicInferenceParams
-from hnet.modules.mha import _update_kv_cache
-from hnet.modules.rotary import RotaryEmbedding
+from .rotary import RotaryEmbedding
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
+def _update_kv_cache(kv, inference_params, layer_idx):
+    """kv: (batch_size, seqlen, 2, nheads, head_dim) or (batch_size, 1, 2, nheads, head_dim)"""
+    # Pre-allocate memory for key-values for inference.
+    num_heads, head_dim = kv.shape[-2:]
+    if layer_idx not in inference_params.key_value_memory_dict:
+        kv_cache = torch.empty(
+            inference_params.max_batch_size,
+            inference_params.max_seqlen,
+            2,
+            num_heads,
+            head_dim,
+            dtype=kv.dtype,
+            device=kv.device,
+        )
+        inference_params.key_value_memory_dict[layer_idx] = kv_cache
+    else:
+        kv_cache = inference_params.key_value_memory_dict[layer_idx]
+    # Adjust key and value for inference
+    batch_start = inference_params.batch_size_offset
+    batch_end = batch_start + kv.shape[0]
+    sequence_start = inference_params.seqlen_offset
+    sequence_end = sequence_start + kv.shape[1]
+    assert batch_end <= kv_cache.shape[0]
+    assert sequence_end <= kv_cache.shape[1]
+    assert kv_cache is not None
+    kv_cache[batch_start:batch_end, sequence_start:sequence_end, ...] = kv
+    return kv_cache[batch_start:batch_end, :sequence_end, ...]
 
 class CausalMaskMHA(nn.Module):
     def __init__(
@@ -138,7 +163,7 @@ class CausalMaskMHA(nn.Module):
         score_mod=None,
         cu_seqlens=None,
         max_seqlen=None,
-        inference_params: IsotropicInferenceParams | None = None,
+        inference_params=None,
         **kwargs,
     ):
         """

@@ -1,5 +1,5 @@
 import torch
-from hnet.models.config_hnet import AttnConfig, HNetConfig, SSMConfig
+from hmnet.models.config_hnet import AttnConfig, HNetConfig, SSMConfig
 
 from hmnet.modules.block import create_block
 from hmnet.modules.dm import (

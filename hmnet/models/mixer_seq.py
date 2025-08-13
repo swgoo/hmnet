@@ -1,10 +1,9 @@
-from collections import namedtuple
 from dataclasses import dataclass
 
+from flash_attn.utils.generation import GenerationMixin
 import torch
 import torch.nn as nn
-from flash_attn.utils.generation import GenerationMixin
-from hnet.modules.dc import RoutingModuleOutput
+from ..modules.dc import RoutingModuleOutput
 from torch import Tensor
 
 from .config_hmnet import HMNetConfig
