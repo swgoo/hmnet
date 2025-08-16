@@ -14,7 +14,6 @@ from torchmetrics.classification import AUROC
 from lightning.pytorch.callbacks import ModelCheckpoint
 
 
-
 class IMDBDataset(Dataset):
     def __init__(self, data_path: str):
         data = torch.load(data_path)
@@ -45,6 +44,7 @@ def _collate_batch(batch):
     mask = (input_ids != 0).bool()
     return input_ids, torch.concat(labels), mask
 
+
 class IMDBDataModule(L.LightningDataModule):
     def __init__(self, data_path: str, batch_size: int = 32):
         super().__init__()
@@ -55,9 +55,11 @@ class IMDBDataModule(L.LightningDataModule):
         self.dataset = IMDBDataset(self.data_path)
         self.train_set, self.val_set = random_split(
             self.dataset,
-            [int(len(self.dataset) * 0.8), len(self.dataset) - int(len(self.dataset) * 0.8)],
+            [
+                int(len(self.dataset) * 0.8),
+                len(self.dataset) - int(len(self.dataset) * 0.8),
+            ],
         )
-
 
     def train_dataloader(self):
         return DataLoader(
@@ -75,6 +77,7 @@ class IMDBDataModule(L.LightningDataModule):
             collate_fn=_collate_batch,
         )
 
+
 class HMNetForClassification(L.LightningModule):
     def __init__(
         self,
@@ -89,7 +92,9 @@ class HMNetForClassification(L.LightningModule):
         self.classifier = torch.nn.Linear(model_config.d_model[0], num_classes)
         self.num_classes = num_classes
         self.train_config = train_config or TrainConfig()
-        self.embeddings = torch.nn.Embedding(model_config.vocab_size, model_config.d_model[0])
+        self.embeddings = torch.nn.Embedding(
+            model_config.vocab_size, model_config.d_model[0]
+        )
 
     def forward(self, x: Tensor, mask: Tensor | None = None) -> Tensor:
         x = self.embeddings(x.int())
@@ -107,19 +112,24 @@ class HMNetForClassification(L.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        return torch.optim.Adam(
-            self.model.parameters(), lr=self.train_config.learning_rate
-        )
+        return torch.optim.Adam(self.parameters(), lr=self.train_config.learning_rate)
 
-    def validation_step(self, batch: tuple[Tensor, Tensor, Tensor], batch_idx: int) -> Tensor:
+    def validation_step(
+        self, batch: tuple[Tensor, Tensor, Tensor], batch_idx: int
+    ) -> Tensor:
         inputs, labels, mask = batch
         outputs = self(inputs, mask)
         loss = self.loss(outputs, labels)
         self.log("val_loss", loss, prog_bar=True)
-        self.log("val_accuracy", (outputs.argmax(dim=1) == labels).float().mean(), prog_bar=True)
+        self.log(
+            "val_accuracy",
+            (outputs.argmax(dim=1) == labels).float().mean(),
+            prog_bar=True,
+        )
         self.log(
             "val_auroc",
-            AUROC(num_classes=self.num_classes, task="multiclass")(outputs, labels), prog_bar=True
+            AUROC(num_classes=self.num_classes, task="multiclass")(outputs, labels),
+            prog_bar=True,
         )
 
         return loss
@@ -149,7 +159,7 @@ def main():
         default="data/imdb_dataset.pt",
     )
     args = parser.parse_args()
-    torch.set_float32_matmul_precision('medium')
+    torch.set_float32_matmul_precision("medium")
 
     train_cfg = OmegaConf.load(args.train_config)
     default_train_cfg = OmegaConf.structured(TrainConfig)
@@ -167,8 +177,7 @@ def main():
         train_config=train_config,
     )
     data_module = IMDBDataModule(
-        data_path=args.data_path,
-        batch_size=train_config.batch_size
+        data_path=args.data_path, batch_size=train_config.batch_size
     )
 
     checkpoint_callback = ModelCheckpoint(

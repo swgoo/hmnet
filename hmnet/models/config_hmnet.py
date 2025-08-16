@@ -46,3 +46,10 @@ class HMNetConfig:
             vocab_size=self.vocab_size,
             tie_embeddings=self.tie_embeddings,
         )
+
+
+@dataclass
+class HMNetTrainConfig:
+    batch_size: int = 32
+    learning_rate: float = 0.0001
+    num_epochs: int = 10

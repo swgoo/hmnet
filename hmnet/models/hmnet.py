@@ -3,7 +3,8 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-from .config_hmnet import HMNetConfig
+from torch import Tensor
+from .config_hmnet import HMNetConfig, HMNetTrainConfig
 from ..modules.dc import (
     ChunkLayer,
     DeChunkLayer,
@@ -343,3 +344,26 @@ class HMNet(nn.Module):
             [bpred_output, *prev_boundary_predictions],
             [chunk_attn_score, *prev_chunk_attn_scores],
         )
+
+
+class HMNetForClassification(nn.Module):
+    def __init__(
+        self,
+        model_config: HMNetConfig,
+        num_classes: int,
+    ):
+        super().__init__()
+        self.backbone = HMNet(model_config, stage_idx=0)
+        self.classifier = torch.nn.Linear(model_config.d_model[0], num_classes)
+        self.num_classes = num_classes
+
+    def forward(self, x: Tensor, mask: Tensor | None = None):
+        x, chunk_pred, attn_pred = self.backbone(x, mask=mask)
+        if mask is not None:
+            seq_lengths = mask.sum(dim=1) - 1
+            batch_indices = torch.arange(x.size(0), device=x.device)
+            x = x[batch_indices, seq_lengths, :]
+        else:
+            x = x[:, -1, :]
+        y = self.classifier(x)
+        return y, chunk_pred, attn_pred
