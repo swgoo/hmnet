@@ -200,7 +200,7 @@ class DeChunkAttnScoreLayer(nn.Module):
         mask_score = torch.gather(
             selected_queries,
             dim=-1,
-            index=plug_back_idx.unsqueeze(-1).expand(
+            index=plug_back_idx.unsqueeze(-2).expand(
                 -1, selected_queries.size(-2), plug_back_idx.size(-1)
             ),
         )
