@@ -79,13 +79,19 @@ class ChunkAttnScoreModule(nn.Module):
             softmax_scale if softmax_scale is not None else 1.0 / np.sqrt(d_model)
         )
         factory_kwargs = {"device": device, "dtype": dtype}
-        self.Wqk = nn.Linear(d_model, 2 * d_model, bias=False, **factory_kwargs)
+        self.q_proj_layer = nn.Linear(d_model, d_model, bias=False, **factory_kwargs)
+        self.k_proj_layer = nn.Linear(d_model, d_model, bias=False, **factory_kwargs)
+        with torch.no_grad():
+            self.q_proj_layer.weight.copy_(torch.eye(d_model))
+            self.k_proj_layer.weight.copy_(torch.eye(d_model))
+        self.q_proj_layer.weight._no_reinit = True
+        self.k_proj_layer.weight._no_reinit = True
 
     def allocate_inference_cache(
         self, batch_size, max_seqlen, device, dtype=None
     ) -> ChunkAttnScoreState:
-        dtype = self.Wqk.weight.dtype if dtype is None else dtype
-        device = self.Wqk.weight.device if device is None else device
+        dtype = self.q_proj_layer.weight.dtype if dtype is None else dtype
+        device = self.q_proj_layer.weight.device if device is None else device
         return ChunkAttnScoreState(
             max_seqlen=max_seqlen,
             max_batch_size=batch_size,
@@ -104,9 +110,8 @@ class ChunkAttnScoreModule(nn.Module):
 
     def _project(self, hidden_states: Tensor):
         """Project hidden states to query and key tensors."""
-        qk = self.Wqk(hidden_states)
-        qk = rearrange(qk, "... (two d) -> ... two d", two=2, d=self.d_model)
-        q, k = qk[:, :, 0], qk[:, :, 1]
+        q = self.q_proj_layer(hidden_states)
+        k = self.k_proj_layer(hidden_states)
         return q, k
 
     def _attention_score(self, q, k):
@@ -126,7 +131,7 @@ class ChunkAttnScoreModule(nn.Module):
         q, k = self._project(hidden_states)
         if inference_params is not None:
             self._update_k_cache(k, inference_params)
-            inference_params.seqlen_offset += int(k.shape[-2])
+            inference_params.seqlen_offset += int(q.shape[-2])
             inference_params.last_query = q[:, -1, :]
         return self._attention_score(q, k)
 
@@ -252,30 +257,28 @@ class DeChunkAttnScoreLayer(nn.Module):
         device = mask.device
 
         if q_len == 1:
-            if self.window_size == -1:
-                window_mask = torch.ones(1, kv_len, device=device, dtype=torch.bool)
-            elif self.window_size > 0:
+            causal_mask = torch.ones(1, kv_len, device=device, dtype=torch.bool)
+            if self.window_size > 0:
                 window_mask = torch.zeros(1, kv_len, device=device, dtype=torch.bool)
                 start = max(0, kv_len - int(self.window_size))
                 if start < kv_len:
                     window_mask[:, start:] = True
             else:
-                raise ValueError("window_size must be -1 or >= 0")
+                window_mask = causal_mask
         elif q_len != 1 and kv_len != 1:
             q_idx = torch.arange(q_len, device=device).unsqueeze(-1)
             kv_idx = torch.arange(kv_len, device=device).unsqueeze(-2)
-            if self.window_size == -1:
-                window_mask = q_idx >= kv_idx
-            elif self.window_size > 0:
+            causal_mask = q_idx >= kv_idx
+            if self.window_size > 0:
                 diff = q_idx - kv_idx
                 window_mask = (diff >= 0) & (diff < self.window_size)
             else:
-                raise ValueError("window_size must be -1 or >= 0")
+                window_mask = causal_mask
         else:
             raise ValueError(
                 "Invalid combination of q_seq_len, kv_seq_len, and window_size"
             )
-        final_mask = mask & window_mask.unsqueeze(0)  # [batch, q_seq_len, kv_seq_len]
+        final_mask = (mask & causal_mask) | window_mask.unsqueeze(0)
 
         return create_block_mask(
             lambda b, h, q_idx, kv_idx: final_mask[b, q_idx, kv_idx],

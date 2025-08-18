@@ -5,6 +5,7 @@ from einops import rearrange
 from .rotary import RotaryEmbedding
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
+
 def _update_kv_cache(kv, inference_params, layer_idx):
     """kv: (batch_size, seqlen, 2, nheads, head_dim) or (batch_size, 1, 2, nheads, head_dim)"""
     # Pre-allocate memory for key-values for inference.
@@ -33,6 +34,7 @@ def _update_kv_cache(kv, inference_params, layer_idx):
     kv_cache[batch_start:batch_end, sequence_start:sequence_end, ...] = kv
     return kv_cache[batch_start:batch_end, :sequence_end, ...]
 
+
 class CausalMaskMHA(nn.Module):
     def __init__(
         self,
@@ -55,12 +57,12 @@ class CausalMaskMHA(nn.Module):
         self.layer_idx = layer_idx
         self.softmax_scale = softmax_scale
         self.rotary_emb_dim = rotary_emb_dim
-        assert window_size >= -1, "window_size must be >= -1"
+        assert window_size == -1 or window_size > 0, "window_size must be == -1 or > 0"
         self.window_size = window_size
         self.num_heads = num_heads
         assert self.d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.head_dim = self.d_model // num_heads
-        kv_dim = self.head_dim * (3 * self.num_heads)
+        qkv_dim = self.head_dim * (3 * self.num_heads)
 
         if self.rotary_emb_dim > 0:
             self.rotary_emb = RotaryEmbedding(
@@ -70,7 +72,7 @@ class CausalMaskMHA(nn.Module):
                 device=device,
             )
 
-        self.Wqkv = nn.Linear(d_model, kv_dim, bias=qkv_proj_bias, **factory_kwargs)
+        self.Wqkv = nn.Linear(d_model, qkv_dim, bias=qkv_proj_bias, **factory_kwargs)
         self.out_proj = nn.Linear(
             d_model, d_model, bias=out_proj_bias, **factory_kwargs
         )
