@@ -7,7 +7,7 @@ import kagglehub
 from torch.utils.data import random_split
 from torch.nn.utils.rnn import pad_sequence
 
-max_length = 300
+max_length = 382
 # Download latest version
 path = kagglehub.dataset_download("lakshmi25npathi/imdb-dataset-of-50k-movie-reviews")
 # %%
@@ -22,7 +22,7 @@ tokenizer = ByteTokenizer()
 df["text"] = df["text"].apply(lambda x: x[-max_length:] if len(x) > max_length else x)
 # Encode
 input_ids = tokenizer.encode(
-    df["text"].tolist(), add_bos=False, add_eos=True, add_cls=True
+    df["text"].tolist(), add_bos=True, add_eos=True, add_cls=False
 )
 input_ids = [torch.tensor(ids["input_ids"]) for ids in input_ids]
 assert not any(
@@ -45,11 +45,10 @@ dataset_tensor = {
 import os
 
 
-
 # %%
-os.chdir("/workspace")
-torch.load("data/imdb_dataset.pt")
+os.chdir("/root/workspace/hmnet-archive")
 os.makedirs("data", exist_ok=True)
+torch.save(dataset_tensor, "data/imdb_dataset.pt")
 print(input_ids[:10])
 
 # %%

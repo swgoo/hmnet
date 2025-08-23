@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from re import A
+from typing import Any
 import lightning as L
 from omegaconf import OmegaConf
 import torch
@@ -12,6 +13,8 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import random_split, Dataset
 from torchmetrics.classification import AUROC
 from lightning.pytorch.callbacks import ModelCheckpoint
+
+from hmnet.modules.profiler import RoutingProfiler, ChunkAttnScoreProfiler
 
 
 class IMDBDataset(Dataset):
@@ -34,7 +37,7 @@ class IMDBDataset(Dataset):
 class TrainConfig:
     batch_size: int = 32
     learning_rate: float = 0.001
-    num_epochs: int = 10
+    num_epochs: int = 100_000
 
 
 def _collate_batch(batch):
@@ -59,6 +62,15 @@ class IMDBDataModule(L.LightningDataModule):
                 int(len(self.dataset) * 0.8),
                 len(self.dataset) - int(len(self.dataset) * 0.8),
             ],
+            generator=torch.Generator().manual_seed(42),
+        )
+        _, self.pred_set = random_split(
+            self.dataset,
+            [
+                int(len(self.dataset) * 0.95),
+                len(self.dataset) - int(len(self.dataset) * 0.95),
+            ],
+            generator=torch.Generator().manual_seed(42),
         )
 
     def train_dataloader(self):
@@ -77,6 +89,14 @@ class IMDBDataModule(L.LightningDataModule):
             collate_fn=_collate_batch,
         )
 
+    def predict_dataloader(self):
+        return DataLoader(
+            self.pred_set,
+            batch_size=self.batch_size,
+            shuffle=False,
+            collate_fn=_collate_batch,
+        )
+
 
 class HMNetForClassification(L.LightningModule):
     def __init__(
@@ -86,7 +106,7 @@ class HMNetForClassification(L.LightningModule):
         train_config: TrainConfig | None = None,
     ):
         super().__init__()
-        self.model = HMNet(model_config, stage_idx=0)
+        self.backbone = HMNet(model_config, stage_idx=0)
         self.save_hyperparameters(ignore=["model_config"])
         self.loss = torch.nn.CrossEntropyLoss()
         self.classifier = torch.nn.Linear(model_config.d_model[0], num_classes)
@@ -96,17 +116,17 @@ class HMNetForClassification(L.LightningModule):
             model_config.vocab_size, model_config.d_model[0]
         )
 
-    def forward(self, x: Tensor, mask: Tensor | None = None) -> Tensor:
+    def forward(self, x: Tensor, mask: Tensor | None = None):
         x = self.embeddings(x.int())
-        x, _, _ = self.model(x, mask=mask)
-        x = self.classifier(x[:, 0, :])
-        return x
+        x, bp, ap = self.backbone(x, mask=mask)
+        x = self.classifier(x[:, -1, :])
+        return x, bp, ap
 
     def training_step(
         self, batch: tuple[Tensor, Tensor, Tensor], batch_idx: int
     ) -> Tensor:
         inputs, labels, mask = batch
-        outputs = self(inputs, mask)
+        outputs, _, _ = self(inputs, mask)
         loss = self.loss(outputs, labels)
         self.log("train_loss", loss, prog_bar=True)
         return loss
@@ -134,6 +154,22 @@ class HMNetForClassification(L.LightningModule):
 
         return loss
 
+    def predict_step(self, batch: Any, batch_idx: int) -> Any:
+        inputs, labels, mask = batch
+        logits, boundary_pred, chunk_attn_pred = self(inputs, mask)
+        chunk_attn_profiler = ChunkAttnScoreProfiler(
+            chunk_attn_pred, [bp.boundary_mask for bp in boundary_pred]
+        )
+        dechunk_attn = chunk_attn_profiler.dechunk_all_stage()
+        boundary_profiler = RoutingProfiler(boundary_pred)
+        dechunked_boundary = boundary_profiler.dechunk_all_stage()
+        return {
+            "logits": logits,
+            "labels": labels,
+            "dechunk_attn": torch.stack(list(dechunk_attn), dim=1),
+            "dechunked_boundary": torch.stack(list(dechunked_boundary), dim=1),
+        }
+
 
 def main():
     parser = argparse.ArgumentParser(description="Train HMNet model")
@@ -149,7 +185,7 @@ def main():
         type=str,
         required=False,
         help="Path to model config file",
-        default="configs/hmnet_toy.yaml",
+        default="configs/hmnet_2stage_L.yaml",
     )
     parser.add_argument(
         "--data_path",
@@ -176,6 +212,8 @@ def main():
         num_classes=2,  # Assuming binary classification for IMDB
         train_config=train_config,
     )
+
+    # model.load_state_dict(torch.load("ckpts/hnet_2stage_L.pt"), strict=False)
     data_module = IMDBDataModule(
         data_path=args.data_path, batch_size=train_config.batch_size
     )
@@ -192,9 +230,14 @@ def main():
         max_epochs=train_config.num_epochs,
         accelerator="cuda" if torch.cuda.is_available() else "cpu",
         callbacks=[checkpoint_callback],
+        precision="bf16",
     )
 
-    trainer.fit(model, datamodule=data_module)
+    trainer.fit(
+        model,
+        datamodule=data_module,
+        ckpt_path="checkpoints/hmnet-epoch=00-val_loss=0.69.ckpt",
+    )
 
 
 if __name__ == "__main__":

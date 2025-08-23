@@ -15,9 +15,9 @@ decoder_ssm_cfg:
 encoder_attn_cfg:
   num_heads: [16, 16]
   rotary_emb_dim: [32, 48]
-  window_size: [1023, -1]
+  window_size: [100, -1]
 decoder_attn_cfg:
   num_heads: [16, 16]
   rotary_emb_dim: [32, 48]
-  window_size: [-1, -1]
+  window_size: [10, 10]
 tie_embeddings: false

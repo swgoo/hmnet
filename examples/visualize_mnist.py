@@ -3,7 +3,7 @@ import os
 import torch
 
 os.chdir("/workspace")
-results = torch.load("results/mnist_predictions.pt")
+results = torch.load("results/imdb_predictions.pt")
 
 results["dechunked_boundary_preds"] = results["dechunked_boundary_preds"].reshape(
     -1, 1, 7, 7
