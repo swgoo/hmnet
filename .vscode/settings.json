@@ -9,6 +9,6 @@
     "python.testing.unittestEnabled": false,
     "python.testing.pytestEnabled": true,
     "terminal.integrated.env.linux": {
-        "PYTHONPATH": "${workspaceFolder}/src:${env:PYTHONPATH}"
+        "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
     }
 }
