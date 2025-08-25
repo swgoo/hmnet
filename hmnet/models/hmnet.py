@@ -222,9 +222,10 @@ class HMNet(nn.Module):
             )
         )
 
-        chunk_attn_score = self.chunk_attn_score_module(
+        chunk_attn_logit = self.chunk_attn_score_module(
             hidden_states, inference_params.chunk_attn_score_state
         )
+        chunk_attn_score = chunk_attn_logit.softmax(dim=-1)
 
         hidden_states = self.dechunk_layer(
             hidden_states,
@@ -264,7 +265,7 @@ class HMNet(nn.Module):
         return (
             hidden_states,
             [bpred_output, *prev_boundary_predictions],
-            [chunk_attn_score, *prev_chunk_attn_scores],
+            [chunk_attn_logit, *prev_chunk_attn_scores],
         )
 
     def step(self, hidden_states: torch.Tensor, inference_params: HMNetState):
@@ -309,9 +310,10 @@ class HMNet(nn.Module):
             prev_boundary_predictions = []
             prev_chunk_attn_scores = []
 
-        chunk_attn_score = self.chunk_attn_score_module.step(
+        chunk_attn_logit = self.chunk_attn_score_module.step(
             hidden_states_inner, inference_params.chunk_attn_score_state
         )
+        chunk_attn_score = chunk_attn_logit.softmax(dim=-1)
 
         hidden_states = self.dechunk_layer.step(
             hidden_states_inner,
@@ -343,7 +345,7 @@ class HMNet(nn.Module):
         return (
             hidden_states,
             [bpred_output, *prev_boundary_predictions],
-            [chunk_attn_score, *prev_chunk_attn_scores],
+            [chunk_attn_logit, *prev_chunk_attn_scores],
         )
 
 
@@ -374,7 +376,7 @@ class HMNetForClassification(nn.Module):
 class CausalLMOutput:
     logits: torch.Tensor
     bpred_output: list[RoutingModuleOutput]
-    chunk_attn_score_output: list[Tensor]
+    chunk_attn_logit_output: list[Tensor]
     inference_params: HMNetState | None
 
 
@@ -447,7 +449,7 @@ class HMNetForCausalLM(nn.Module, GenerationMixin):
             cu_seqlens = None
             max_seqlen = None
 
-        hidden_states, bpred_output, chunk_attn_score_output = self.backbone(
+        hidden_states, bpred_output, chunk_attn_logit_output = self.backbone(
             hidden_states,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
@@ -465,7 +467,7 @@ class HMNetForCausalLM(nn.Module, GenerationMixin):
         return CausalLMOutput(
             logits=lm_logits,
             bpred_output=bpred_output,
-            chunk_attn_score_output=chunk_attn_score_output,
+            chunk_attn_logit_output=chunk_attn_logit_output,
             inference_params=inference_params,
         )
 
@@ -477,7 +479,7 @@ class HMNetForCausalLM(nn.Module, GenerationMixin):
 
         hidden_states = self.embeddings(input_ids)
 
-        hidden_states, bpred_output, chunk_attn_score_output = self.backbone.step(
+        hidden_states, bpred_output, chunk_attn_logit_output = self.backbone.step(
             hidden_states, inference_params
         )
         logits = self.lm_head(hidden_states)
@@ -485,6 +487,6 @@ class HMNetForCausalLM(nn.Module, GenerationMixin):
         return CausalLMOutput(
             logits=logits,
             bpred_output=bpred_output,
-            chunk_attn_score_output=chunk_attn_score_output,
+            chunk_attn_logit_output=chunk_attn_logit_output,
             inference_params=inference_params,
         )

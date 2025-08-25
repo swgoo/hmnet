@@ -114,14 +114,13 @@ class ChunkAttnScoreModule(nn.Module):
         k = self.k_proj_layer(hidden_states)
         return q, k
 
-    def _attention_score(self, q, k):
+    def _attention_logit(self, q, k):
         attn_score = einsum(
             F.normalize(q, dim=-1),
             F.normalize(k, dim=-1),
             "... l d, ... m d -> ... l m",
         )
-        attn_score = torch.softmax(attn_score * self.softmax_scale, dim=-1)
-        return attn_score
+        return attn_score * self.softmax_scale
 
     def forward(
         self,
@@ -133,7 +132,7 @@ class ChunkAttnScoreModule(nn.Module):
             self._update_k_cache(k, inference_params)
             inference_params.seqlen_offset += int(q.shape[-2])
             inference_params.last_query = q[:, -1, :]
-        return self._attention_score(q, k)
+        return self._attention_logit(q, k)
 
     def step(self, hidden_states: Tensor, inference_params: ChunkAttnScoreState):
         if hidden_states.shape[0] > 0:
@@ -144,7 +143,7 @@ class ChunkAttnScoreModule(nn.Module):
         else:
             q = inference_params.last_query.unsqueeze(-2)
             k_cache = inference_params.last_key
-        return self._attention_score(q, k_cache)
+        return self._attention_logit(q, k_cache)
 
 
 @dataclass
