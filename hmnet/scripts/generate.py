@@ -5,7 +5,7 @@ import argparse
 import sys
 from omegaconf import ListConfig
 
-from hmnet.models.mixer_seq import HMNetForCausalLM
+from hmnet.models.hmnet import HMNetForCausalLM
 from hmnet.models.config_hmnet import HMNetConfig
 from hmnet.models.tokenizer import ByteTokenizer
 
