@@ -42,16 +42,22 @@ def test_masking_module():
     max_seqlen = 10
     max_batch_size = 4
 
-    module = ChunkAttnScoreModule(d_model=d_model, device="cuda", dtype=torch.float32)
+    module = ChunkAttnScoreModule(
+        d_model=d_model,
+        device="cuda",
+        dtype=torch.float32,
+        n_chunk_select=16,
+        window_size=5,
+    )
     inference_params = ChunkAttnScoreState(
         max_seqlen=max_seqlen, max_batch_size=max_batch_size
     )
     x = torch.randn(batch_size, seqlen, d_model, device="cuda")
-    block_score = module.forward(x)
+    mask = torch.ones(batch_size, seqlen, device="cuda")
+    block_score = module.forward(x, mask)
     assert block_score.shape == (batch_size, seqlen, seqlen)
-    assert torch.all(block_score.sum(-1) > 0.999)
+    assert torch.all(torch.softmax(block_score, -1).sum(-1) > 0.999)
     assert torch.all(block_score.sum(-1) < 1.001)
-    mask = torch.ones(batch_size, seqlen, seqlen)
     boundary_mask = torch.tensor(
         [
             [1, 0, 0, 0, 0],
@@ -113,16 +119,19 @@ def test_masking_module_step():
         d_model=64,
         device="cuda",
         dtype=torch.float32,
+        n_chunk_select=16,
+        window_size=5,
     )
     batch_size = 1
     seqlen = 5
     n_step = 3
     max_seqlen = seqlen + n_step
     x = torch.randn(batch_size, seqlen, 64).to("cuda")
+    mask = torch.ones(batch_size, seqlen).to("cuda")
     inference_params = masking_module.allocate_inference_cache(
         batch_size=batch_size, max_seqlen=max_seqlen, dtype=torch.float32, device="cuda"
     )
-    masking_module.forward(x, inference_params=inference_params)
+    masking_module.forward(x, mask=mask, inference_params=inference_params)
     empty_query = torch.randn(0, 1, 64).to("cuda")
     query = torch.randn(1, 1, 64).to("cuda")
 

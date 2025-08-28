@@ -94,7 +94,10 @@ class HMNet(nn.Module):
                 window_size=config.decoder_attn_cfg.window_size[stage_idx]
             )
             self.chunk_attn_score_module = ChunkAttnScoreModule(
-                self.d_model, **factory_kwargs
+                d_model=self.d_model,
+                n_chunk_select=config.n_chunk_select[stage_idx],
+                window_size=config.decoder_attn_cfg.window_size[stage_idx],
+                **factory_kwargs,
             )
 
             self.residual_proj = nn.Linear(
@@ -223,7 +226,9 @@ class HMNet(nn.Module):
         )
 
         chunk_attn_logit = self.chunk_attn_score_module(
-            hidden_states, inference_params.chunk_attn_score_state
+            hidden_states,
+            inference_params=inference_params.chunk_attn_score_state,
+            mask=next_mask,  # FIXME
         )
         chunk_attn_score = chunk_attn_logit.softmax(dim=-1)
 

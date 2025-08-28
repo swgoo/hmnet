@@ -69,12 +69,16 @@ class ChunkAttnScoreModule(nn.Module):
     def __init__(
         self,
         d_model,
+        window_size,
+        n_chunk_select=16,
         softmax_scale=None,
         device=None,
         dtype=None,
     ):
         super().__init__()
         self.d_model = d_model
+        self.window_size = window_size
+        self.n_chunk_select = n_chunk_select
         self.softmax_scale = (
             softmax_scale if softmax_scale is not None else 1.0 / np.sqrt(d_model)
         )
@@ -125,14 +129,25 @@ class ChunkAttnScoreModule(nn.Module):
     def forward(
         self,
         hidden_states: Tensor,
+        mask: Tensor,
         inference_params: ChunkAttnScoreState | None = None,
     ):
         q, k = self._project(hidden_states)
+        mask = mask.bool()
         if inference_params is not None:
             self._update_k_cache(k, inference_params)
             inference_params.seqlen_offset += int(q.shape[-2])
             inference_params.last_query = q[:, -1, :]
-        return self._attention_logit(q, k)
+        logits = self._attention_logit(q, k)
+        mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
+        causal_without_window = torch.ones_like(logits).tril(-self.window_size).bool()
+        mask_2d = mask_2d & causal_without_window
+        logits = logits.masked_fill(~mask_2d, -1e9)
+        num_top_k = min(logits.shape[-1], self.n_chunk_select)
+        top_k = torch.topk(logits, k=num_top_k, dim=-1, sorted=False).indices
+        top_mask = torch.zeros_like(logits, dtype=torch.bool)
+        top_mask.scatter_(-1, top_k, True)
+        return logits.masked_fill(~top_mask, -1e9)
 
     def step(self, hidden_states: Tensor, inference_params: ChunkAttnScoreState):
         if hidden_states.shape[0] > 0:
@@ -143,7 +158,21 @@ class ChunkAttnScoreModule(nn.Module):
         else:
             q = inference_params.last_query.unsqueeze(-2)
             k_cache = inference_params.last_key
-        return self._attention_logit(q, k_cache)
+        logits = self._attention_logit(q, k_cache)
+        kv_len = logits.shape[-1]
+        causal_without_window = torch.ones_like(
+            logits, device=logits.device, dtype=torch.bool
+        )
+        if self.window_size > 0 and kv_len > self.window_size:
+            causal_without_window[..., : -self.window_size] = False
+        mask = causal_without_window
+        logits = logits.masked_fill(~mask, -1e9)
+        num_top_k = min(kv_len, self.n_chunk_select)
+        top_k = torch.topk(logits, k=num_top_k, dim=-1, sorted=False).indices
+        top_mask = torch.zeros_like(logits, dtype=torch.bool)
+        top_mask.scatter_(-1, top_k, True)
+        logits = logits.masked_fill(~top_mask, -1e9)
+        return logits
 
 
 @dataclass

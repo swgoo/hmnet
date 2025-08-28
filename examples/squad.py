@@ -620,5 +620,5 @@ if __name__ == "__main__":
     trainer.fit(
         model,
         datamodule=data_module,
-        # ckpt_path="checkpoints/hmnet-epoch=00-val_loss=0.69.ckpt",
+        ckpt_path="checkpoints/hmnet-squad-epoch=13-val_loss=0.25.ckpt",
     )

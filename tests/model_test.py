@@ -21,6 +21,7 @@ def test_hmnet():
         decoder_ssm_cfg=ssm_config,
         arch_layout=["m1T1", ["t1"], "T1m1"],
         d_intermediate=[128, 256],
+        n_chunk_select=[16],
     )
 
     # Test forward pass
@@ -58,6 +59,7 @@ def test_step():
         decoder_ssm_cfg=ssm_config,
         arch_layout=["T1", ["t1"], "T1"],
         d_intermediate=[128, 256],
+        n_chunk_select=[4],
     )
     model = HMNet(config=config, device="cuda", stage_idx=0).to("cuda")
 
