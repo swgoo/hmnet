@@ -4,7 +4,10 @@
 		"../docker-compose.yml"
 	],
 	"service": "dev",
-	"workspaceFolder": "/workspace",
+	"workspaceFolder": "/workspace/${localWorkspaceFolderBasename}",
+	"mounts": [
+		"source=${localWorkspaceFolder},target=/workspace/${localWorkspaceFolderBasename},type=bind"
+	],
 	"shutdownAction": "stopCompose",
 	"extensions": [
 		"ms-python.python",
