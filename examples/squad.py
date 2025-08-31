@@ -338,16 +338,16 @@ if __name__ == "__main__":
         type=str,
         required=False,
         help="Path to model config file",
-        # default="configs/hmnet_3stage_XL.yaml",
-        default="configs/hmnet_1stage_L.yaml",
+        default="configs/hmnet_3stage_XL.yaml",
+        # default="configs/hmnet_1stage_L.yaml",
     )
     parser.add_argument(
         "--model_path",
         type=str,
         required=False,
         help="Path to model file",
-        # default="ckpts/hmnet_3stage_XL_from_2stage_XL.pt",
-        default=None,
+        default="ckpts/hmnet_3stage_XL_from_2stage_XL.pt",
+        # default=None,
     )
     parser.add_argument(
         "--batch_size",
