@@ -2,6 +2,7 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from turtle import right
 
 import lightning as L
 import requests
@@ -53,7 +54,7 @@ class SQuADExample:
 
     @classmethod
     def get_SQuAD_examples(
-        cls, data: dict, max_question_len=128, max_answer_len=64
+        cls, data: dict, max_question_len=128, max_answer_len=64, use_one_answer=False
     ) -> list["SQuADExample"]:
 
         squad_examples: list["SQuADExample"] = []
@@ -70,10 +71,14 @@ class SQuADExample:
                         answers = qa["plausible_answers"]
                     else:
                         answers = qa["answers"]
+                    if use_one_answer and len(answers) > 0:
+                        answers = answers[:1]
                     for ans in answers:
                         ans_text = ans["text"]
                         if len(ans_text) > max_answer_len:
                             continue
+                        elif is_impossible:
+                            ans_text = "no answer"
                         squad_examples.append(
                             SQuADExample(
                                 qa_id=qa["id"],
@@ -99,10 +104,7 @@ class QAInput:
     def get_qa_inputs(cls, squad_examples: list[SQuADExample]) -> list["QAInput"]:
         result: list["QAInput"] = []
         for ex in squad_examples:
-            if ex.is_impossible:
-                answer_ids = byte_tokenizer.encode(["no answer"])[0]
-            else:
-                answer_ids = ex.answer
+            answer_ids = ex.answer
 
             input_ids = torch.cat([ex.context, ex.question, answer_ids], dim=0)
             input_ids = byte_tokenizer.add_special_tokens(input_ids, bos=True, eos=True)
@@ -134,19 +136,18 @@ class QADataset(Dataset):
 
 class QATripletDataset(IterableDataset):
     def __init__(
-        self, squad_examples: list[SQuADExample], seed=42, samples_per_epoch=5000
+        self,
+        squad_examples: list[SQuADExample],
+        seed=42,
+        samples_per_epoch=5000,
+        max_context_length=512,
     ):
         self.data: list[SQuADExample] = squad_examples
         self.seed = seed
         self._rng = torch.Generator().manual_seed(seed)
         self._len = len(squad_examples)
         self.samples_per_epoch = samples_per_epoch
-        self.max_context_length = 512
-
-        for ex in self.data:
-            ex.context = self._crop_context(
-                ex.context, ex.answer_start, ex.answer.size(0)
-            )
+        self.max_context_length = max_context_length
 
     def _crop_context(
         self, context_ids: Tensor, answer_start: int, answer_len: int
@@ -169,8 +170,15 @@ class QATripletDataset(IterableDataset):
         if answer_len >= self.max_context_length:
             return context_ids[: self.max_context_length]
 
-        window_start = max(0, answer_start - self.max_context_length // 2)
-        window_end = min(len(context_ids), answer_start + self.max_context_length // 2)
+        left = torch.randint(
+            self.max_context_length // 4,
+            self.max_context_length - self.max_context_length // 4,
+            (1,),
+            generator=self._rng,
+        ).item()
+        right = self.max_context_length - left
+        window_start = max(0, answer_start - left)
+        window_end = min(len(context_ids), answer_start + right)
 
         return context_ids[window_start:window_end]
 
@@ -179,12 +187,17 @@ class QATripletDataset(IterableDataset):
 
     def _sample_triplet(self):
         indices = torch.randint(0, self._len, (3,), generator=self._rng)
-        contexts = [self.data[i].context for i in indices]
-        context_lens = [c.size(0) for c in contexts]
-
         selected_qa_index = torch.randint(0, 3, (1,), generator=self._rng).item()
+
+        selected_data = [self.data[i] for i in indices]
         qa_example = self.data[indices[selected_qa_index]]
+
         qa = torch.cat([qa_example.question, qa_example.answer], dim=0)
+        contexts = [
+            self._crop_context(d.context, d.answer_start, d.answer.size(0))
+            for d in selected_data
+        ]
+        context_lens = [c.size(0) for c in contexts]
 
         tokens = torch.cat([*contexts, qa], dim=0)
         tokens: torch.Tensor = byte_tokenizer.add_special_tokens(
@@ -354,7 +367,7 @@ if __name__ == "__main__":
         type=int,
         required=False,
         help="Batch size for training",
-        default=4,
+        default=2,
     )
     parser.add_argument(
         "--learning_rate",
@@ -369,6 +382,20 @@ if __name__ == "__main__":
         required=False,
         help="Number of training epochs",
         default=1_000_000,
+    )
+    parser.add_argument(
+        "--max_context_length",
+        type=int,
+        required=False,
+        help="Maximum context length for training",
+        default=1500,
+    )
+    parser.add_argument(
+        "--train_samples",
+        type=int,
+        required=False,
+        help="Number of training samples",
+        default=12000,
     )
 
     args = parser.parse_args()
@@ -389,10 +416,17 @@ if __name__ == "__main__":
 
     data = load_SQuAD_json()
     train_squad_examples = SQuADExample.get_SQuAD_examples(data["train"])
-    train_dataset = QATripletDataset(train_squad_examples, samples_per_epoch=5000)
+    train_dataset = QATripletDataset(
+        train_squad_examples,
+        samples_per_epoch=args.train_samples,
+        max_context_length=args.max_context_length,
+    )
 
     val_squad_examples = SQuADExample.get_SQuAD_examples(
-        data["dev"], max_question_len=4096, max_answer_len=4096
+        data["dev"][:10],
+        max_question_len=4096,
+        max_answer_len=4096,
+        use_one_answer=True,
     )
     val_input_ids_list = QAInput.get_qa_inputs(val_squad_examples)
     val_dataset = QADataset(val_input_ids_list)
@@ -412,15 +446,23 @@ if __name__ == "__main__":
         mode="min",
     )
 
+    train_checkpoint_callback = ModelCheckpoint(
+        monitor="train_loss",
+        dirpath="checkpoints",
+        filename="hmnet-squad-train-{epoch:02d}-{train_loss:.2f}",
+        save_top_k=3,
+        mode="min",
+    )
+
     trainer = L.Trainer(
         max_epochs=args.num_epochs,
         accelerator="cuda" if torch.cuda.is_available() else "cpu",
-        callbacks=[checkpoint_callback],
+        callbacks=[checkpoint_callback, train_checkpoint_callback],
         precision="bf16",
     )
 
     trainer.fit(
         model,
         datamodule=data_module,
-        # ckpt_path="checkpoints/hmnet-squad-epoch=13-val_loss=0.25.ckpt",
+        ckpt_path="checkpoints/hmnet-squad-train-epoch=51-train_loss=0.13.ckpt",
     )
