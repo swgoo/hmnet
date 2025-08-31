@@ -1,310 +1,270 @@
 import argparse
 import json
-from math import e
-import random
 from dataclasses import dataclass
 from pathlib import Path
 
 import lightning as L
-from omegaconf import OmegaConf
 import requests
 import torch
-import torch.nn.functional as F  # 추가
+import torch.nn.functional as F
 from lightning.pytorch.callbacks import ModelCheckpoint
-from torch import ByteTensor
+from omegaconf import OmegaConf
+from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 from hmnet.models.config_hmnet import HMNetConfig
 from hmnet.models.hmnet import CausalLMOutput, HMNetForCausalLM
 from hmnet.models.tokenizer import ByteTokenizer
-from hmnet.modules.dc import RoutingModuleOutput
-from hmnet.modules.profiler import ChunkAttnScoreProfiler
+
+byte_tokenizer = ByteTokenizer()
 
 
-@dataclass
-class SquadExample:
-    context: str
-    question: str
-    answer: str
-    is_impossible: bool
-    answer_start: int
-
-    def __str__(self) -> str:
-        return f"Context: {self.context}\nQuestion: {self.question}\nAnswer: {self.answer}\nIs Impossible: {self.is_impossible}\nAnswer Start: {self.answer_start}"
-
-
-def load_SQuAD_json(squad_data_path=Path("data/squad.json")) -> list[dict]:
+def load_SQuAD_json(
+    squad_data_path=Path("data/squad.json"),
+    squad_dev_data_path=Path("data/squad_dev.json"),
+):
     if not squad_data_path.exists():
         url = "https://rajpurkar.github.io/SQuAD-explorer/dataset/train-v2.0.json"
         response = requests.get(url)
         with open(squad_data_path, "wb") as f:
             f.write(response.content)
+    if not squad_dev_data_path.exists():
+        url = "https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json"
+        response = requests.get(url)
+        with open(squad_dev_data_path, "wb") as f:
+            f.write(response.content)
 
     with open(squad_data_path) as f:
-        data = json.load(f)["data"]
-    return data
-
-
-def get_SQuAD_examples(data: dict) -> list[SquadExample]:
-
-    squad_examples: list[SquadExample] = []
-    max_question_len = 128
-    max_answer_len = 64
-
-    for item in data:
-        for paragraph in item["paragraphs"]:
-            context = paragraph["context"]
-            for qa in paragraph["qas"]:
-                question = qa["question"]
-                if len(question) > max_question_len:
-                    continue
-                is_impossible = qa["is_impossible"]
-                if is_impossible:
-                    answers = qa["plausible_answers"]
-                else:
-                    answers = qa["answers"]
-                for ans in answers:
-                    ans_text = ans["text"]
-                    if len(ans_text) > max_answer_len:
-                        continue
-                    squad_examples.append(
-                        SquadExample(
-                            context,
-                            question,
-                            ans_text,
-                            is_impossible,
-                            ans["answer_start"],
-                        )
-                    )
-
-    return squad_examples
-
-
-def eda_squad(squad_examples: list[SquadExample]):
-    print(f"Number of examples: {len(squad_examples)}")
-    context_lengths = [len(ex.context) for ex in squad_examples]
-    print(f"Average context length: {sum(context_lengths) / len(context_lengths)}")
-    print(f"Max context length: {max(context_lengths)}")
-    print(f"Min context length: {min(context_lengths)}")
-    # std
-    print(
-        f"Context length std: {torch.std(torch.tensor(context_lengths).float()).item()}"
-    )
-
-    question_lengths = [len(ex.question) for ex in squad_examples]
-    print(f"Average question length: {sum(question_lengths) / len(question_lengths)}")
-    print(f"Max question length: {max(question_lengths)}")
-    print(f"Min question length: {min(question_lengths)}")
-    # std
-    print(
-        f"Question length std: {torch.std(torch.tensor(question_lengths).float()).item()}"
-    )
-
-    answer_lengths = [len(ex.answer) for ex in squad_examples if not ex.is_impossible]
-    print(f"Average answer length: {sum(answer_lengths) / len(answer_lengths)}")
-    print(f"Max answer length: {max(answer_lengths)}")
-    print(f"Min answer length: {min(answer_lengths)}")
-    # std
-    print(
-        f"Answer length std: {torch.std(torch.tensor(answer_lengths).float()).item()}"
-    )
+        train_data = json.load(f)["data"]
+    with open(squad_dev_data_path) as f:
+        dev_data = json.load(f)["data"]
+    return {"train": train_data, "dev": dev_data}
 
 
 @dataclass
-class QAInputIDs:
-    context: ByteTensor
-    question: ByteTensor
-    answer: ByteTensor
+class SQuADExample:
+    qa_id: str
+    context: Tensor
+    question: Tensor
+    answer: Tensor
+    is_impossible: bool
+    answer_start: int
+
+    @classmethod
+    def get_SQuAD_examples(
+        cls, data: dict, max_question_len=128, max_answer_len=64
+    ) -> list["SQuADExample"]:
+
+        squad_examples: list["SQuADExample"] = []
+
+        for item in data:
+            for paragraph in item["paragraphs"]:
+                context: str = paragraph["context"]
+                for qa in paragraph["qas"]:
+                    question = qa["question"]
+                    if len(question) > max_question_len:
+                        continue
+                    is_impossible = qa["is_impossible"]
+                    if is_impossible:
+                        answers = qa["plausible_answers"]
+                    else:
+                        answers = qa["answers"]
+                    for ans in answers:
+                        ans_text = ans["text"]
+                        if len(ans_text) > max_answer_len:
+                            continue
+                        squad_examples.append(
+                            SQuADExample(
+                                qa_id=qa["id"],
+                                context=byte_tokenizer.encode([context])[0],
+                                question=byte_tokenizer.encode([question])[0],
+                                answer=byte_tokenizer.encode([ans_text])[0],
+                                is_impossible=is_impossible,
+                                answer_start=ans["answer_start"],
+                            )
+                        )
+
+        return squad_examples
 
 
-def crop_context(
-    context_text: str, answer_start: int, answer_text: str, max_len: int
-) -> str:
-    """
-    Returns a substring of context_text of at most max_len chars that contains the answer.
-    If impossible (answer_text == ""), returns the leading max_len chars.
-    """
-    if max_len <= 0:
-        return ""
-    if not answer_text:  # impossible case
-        return context_text[:max_len]
+@dataclass
+class QAInput:
+    input_ids: torch.Tensor
+    answer_masks: torch.Tensor
+    pad_masks: torch.Tensor
+    qa_ids: list[str]
 
-    answer_end = answer_start + len(answer_text)
-    if answer_start < 0 or answer_end > len(context_text):
-        # Fallback: invalid span, just truncate
-        return context_text[:max_len]
+    @classmethod
+    def get_qa_inputs(cls, squad_examples: list[SQuADExample]) -> list["QAInput"]:
+        result: list["QAInput"] = []
+        for ex in squad_examples:
+            if ex.is_impossible:
+                answer_ids = byte_tokenizer.encode(["no answer"])[0]
+            else:
+                answer_ids = ex.answer
 
-    # If answer itself longer than max_len, just return its head
-    if len(answer_text) >= max_len:
-        return answer_text[:max_len]
+            input_ids = torch.cat([ex.context, ex.question, answer_ids], dim=0)
+            input_ids = byte_tokenizer.add_special_tokens(input_ids, bos=True, eos=True)
+            answer_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+            answer_mask[-(answer_ids.size(0) + 1) :] = True  # answer + EOS
 
-    # Try to center answer in the window
-    remaining = max_len - len(answer_text)
-    left_budget = remaining // 2
-    right_budget = remaining - left_budget
-
-    window_start = max(0, answer_start - left_budget)
-    window_end = min(len(context_text), answer_end + right_budget)
-
-    # Adjust if we are short due to boundaries
-    current_len = window_end - window_start
-    if current_len < max_len:
-        need = max_len - current_len
-        # Try extend left then right
-        extend_left = min(need, window_start)
-        window_start -= extend_left
-        need -= extend_left
-        if need:
-            window_end = min(len(context_text), window_end + need)
-
-    return context_text[window_start:window_end]
-
-
-def generate_qa_input_ids(squad_examples: list[SquadExample]) -> list[QAInputIDs]:
-    tokenizer = ByteTokenizer()
-    max_len = 512
-    input_ids_list: list[QAInputIDs] = []
-    for ex in squad_examples:
-        cropped_context = crop_context(ex.context, ex.answer_start, ex.answer, max_len)
-        if ex.is_impossible:
-            answer_text = "there is no answer"
-        else:
-            answer_text = ex.answer
-
-        context_ids = tokenizer.encode([cropped_context])[0]["input_ids"]
-        question_ids = tokenizer.encode([ex.question])[0]["input_ids"]
-        answer_ids = tokenizer.encode([answer_text])[0]["input_ids"]
-
-        input_ids_list.append(
-            QAInputIDs(
-                context=torch.tensor(context_ids, dtype=torch.uint8),
-                question=torch.tensor(question_ids, dtype=torch.uint8),
-                answer=torch.tensor(answer_ids, dtype=torch.uint8),
+            result.append(
+                QAInput(
+                    input_ids=input_ids,
+                    answer_masks=answer_mask,
+                    pad_masks=torch.ones_like(input_ids, dtype=torch.bool),
+                    qa_ids=[ex.qa_id],
+                )
             )
-        )
 
-    return input_ids_list
+        return result
 
 
-class QAGeneratorDataset(IterableDataset):
-    def __init__(self, input_ids_list, seed=42, samples_per_epoch=5000):
-        self.data: list[QAInputIDs] = input_ids_list
+class QADataset(Dataset):
+    def __init__(self, qa_inputs: list[QAInput]):
+        self.data: list[QAInput] = qa_inputs
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+
+class QATripletDataset(IterableDataset):
+    def __init__(
+        self, squad_examples: list[SQuADExample], seed=42, samples_per_epoch=5000
+    ):
+        self.data: list[SQuADExample] = squad_examples
         self.seed = seed
         self._rng = torch.Generator().manual_seed(seed)
-        self._len = len(input_ids_list)
-        self.samples_per_epoch = samples_per_epoch  # 한 epoch 당 생성할 합성 샘플 수
-        self.tokenizer = ByteTokenizer()
+        self._len = len(squad_examples)
+        self.samples_per_epoch = samples_per_epoch
+        self.max_context_length = 512
+
+        for ex in self.data:
+            ex.context = self._crop_context(
+                ex.context, ex.answer_start, ex.answer.size(0)
+            )
+
+    def _crop_context(
+        self, context_ids: Tensor, answer_start: int, answer_len: int
+    ) -> Tensor:
+        # answer_start 위치가 정확하지는 않아서, max_len을 충분히 크게 잡아야 함
+        """
+        Crops the context_ids to a maximum length of max_len, centering the answer_text if present.
+        """
+        assert self.max_context_length > 0, "max_context_length must be positive"
+        assert answer_len >= 0, "answer_len must be non-negative"
+        assert answer_start >= 0, "answer_start must be non-negative"
+        assert answer_len <= context_ids.size(
+            0
+        ), "answer_len must be less than or equal to context_ids.size(0)"
+
+        answer_end = answer_start + answer_len
+        if answer_end > len(context_ids):
+            return context_ids[: self.max_context_length]
+
+        if answer_len >= self.max_context_length:
+            return context_ids[: self.max_context_length]
+
+        window_start = max(0, answer_start - self.max_context_length // 2)
+        window_end = min(len(context_ids), answer_start + self.max_context_length // 2)
+
+        return context_ids[window_start:window_end]
 
     def __len__(self):
         return self.samples_per_epoch
 
     def _sample_triplet(self):
-        # 3개 context/QA 예제 랜덤 선택
         indices = torch.randint(0, self._len, (3,), generator=self._rng)
-        context_lens = [self.data[i].context.size(0) for i in indices]
+        contexts = [self.data[i].context for i in indices]
+        context_lens = [c.size(0) for c in contexts]
 
         selected_qa_index = torch.randint(0, 3, (1,), generator=self._rng).item()
         qa_example = self.data[indices[selected_qa_index]]
         qa = torch.cat([qa_example.question, qa_example.answer], dim=0)
-        question_len = qa_example.question.size(0)
-        answer_len = qa_example.answer.size(0)
-        qa_len = question_len + answer_len
 
-        context_concat = torch.cat([self.data[i].context for i in indices], dim=0)
+        tokens = torch.cat([*contexts, qa], dim=0)
+        tokens: torch.Tensor = byte_tokenizer.add_special_tokens(
+            tokens, bos=True, eos=True
+        )
 
-        # 블록 대각 causal (각 context 및 QA)
-        blocks = [torch.ones(1, 1, dtype=torch.bool)]  # BOS
-        blocks += [torch.ones(l, l, dtype=torch.bool).tril() for l in context_lens]
-        blocks.append(torch.ones(qa_len, qa_len, dtype=torch.bool).tril())
-        blocks.append(torch.ones(1, 1, dtype=torch.bool))  # EOS
-        causal_attn_mask = torch.block_diag(
-            *blocks
-        )  # shape: (sum_ctx + qa_len, sum_ctx + qa_len)
-
-        # QA 행들에서 선택된 context 블록만 attend 가능
-        total_ctx_len = sum(context_lens)
-        qa_row_slice = slice(total_ctx_len, total_ctx_len + qa_len)
-        ctx_start = sum(context_lens[:selected_qa_index])
-        ctx_end = ctx_start + context_lens[selected_qa_index]
-        # 초기 값은 False → 선택된 context 범위 열만 True
-        causal_attn_mask[qa_row_slice, ctx_start:ctx_end] = True
-        causal_attn_mask[:, 0] = True  # BOS 토큰은 모두 attend 가능
-        causal_attn_mask[-1, :] = True  # EOS 토큰은 모두 attend 가능
-
-        # 최종 토큰 시퀀스 (context들 + QA)
-        tokens = torch.cat([context_concat, qa], dim=0)
-        tokens = self.tokenizer.add_special_tokens(tokens, bos=True, eos=True)
-
-        # answer mask 1d
-        answer_mask = torch.zeros(tokens.size(0), dtype=torch.bool)
-        a_slice = slice(total_ctx_len + question_len, total_ctx_len + qa_len)
+        answer_mask = torch.zeros_like(tokens, dtype=torch.bool)
+        a_slice = slice(
+            sum(context_lens) + qa_example.question.size(0),
+            sum(context_lens)
+            + qa_example.question.size(0)
+            + qa_example.answer.size(0)
+            + 1,
+        )  # +1 for EOS
         answer_mask[a_slice] = True
 
-        return tokens, causal_attn_mask, answer_mask
+        return QAInput(
+            input_ids=tokens,
+            answer_masks=answer_mask,
+            pad_masks=torch.ones_like(tokens, dtype=torch.bool),
+            qa_ids=[qa_example.qa_id],
+        )
 
     def __iter__(self):
-        # samples_per_epoch 만큼 샘플 생성
         for _ in range(self.samples_per_epoch):
             yield self._sample_triplet()
 
 
-def collate_fn(batch):
-    seqs, label_masks, answer_masks = zip(*batch)
-    lengths = torch.tensor([s.size(0) for s in seqs])
+def qa_input_collate_fn(batch: list[QAInput]):
+    seqs = [b.input_ids for b in batch]
+    answer_masks = [b.answer_masks for b in batch]
+    pad_masks = [b.pad_masks for b in batch]
+    qa_ids = [b.qa_ids[0] for b in batch]
+
     padded_seqs = pad_sequence(seqs, batch_first=True, padding_value=0)
     max_len = padded_seqs.size(1)
 
-    padded_labels = torch.stack(
-        [
-            F.pad(m, (0, max_len - m.size(0), 0, max_len - m.size(0)), value=0.0)
-            for m in label_masks
-        ]
-    )  # (B,L,L)
-
-    lengths = lengths.to(padded_seqs.device)
-    input_ids_mask = torch.arange(max_len, device=padded_seqs.device).unsqueeze(
-        0
-    ) < lengths.unsqueeze(1)
+    pad_masks = torch.stack(
+        [F.pad(m, (0, max_len - m.size(0)), value=False) for m in pad_masks]
+    )  # (B,L)
 
     answer_masks = torch.stack(
         [F.pad(m, (0, max_len - m.size(0)), value=False) for m in answer_masks]
     )  # (B,L)
 
-    return {
-        "input_ids": padded_seqs,
-        "attn_label": padded_labels,
-        "answer_mask": answer_masks,
-        "mask": input_ids_mask,
-    }
+    return QAInput(
+        input_ids=padded_seqs,
+        answer_masks=answer_masks,
+        pad_masks=pad_masks,
+        qa_ids=qa_ids,
+    )
 
 
 class QADataModule(L.LightningDataModule):
-    def __init__(self, train_dataset, val_dataset, batch_size):
+    def __init__(self, train_dataset, val_dataset, train_batch_size, val_batch_size):
         super().__init__()
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
-        self.batch_size = batch_size
+        self.train_batch_size = train_batch_size
+        self.val_batch_size = val_batch_size
 
     def train_dataloader(self):
         return DataLoader(
             self.train_dataset,
-            batch_size=self.batch_size,
-            collate_fn=collate_fn,
+            batch_size=self.train_batch_size,
+            collate_fn=qa_input_collate_fn,
         )
 
     def val_dataloader(self):
         return DataLoader(
             self.val_dataset,
-            batch_size=self.batch_size,
-            collate_fn=collate_fn,
+            batch_size=self.val_batch_size,
+            collate_fn=qa_input_collate_fn,
         )
 
     def predict_dataloader(self):
         return DataLoader(
             self.val_dataset,
-            batch_size=self.batch_size,
-            collate_fn=collate_fn,
+            batch_size=self.val_batch_size,
+            collate_fn=qa_input_collate_fn,
         )
 
 
@@ -315,7 +275,6 @@ class HMNetForSQuAD(HMNetForCausalLM, L.LightningModule):
         lr: float = 1e-3,
         weight_decay: float = 0.0,
         pad_token_id: int = 0,
-        aux_loss_weight: float = 1.0,
     ):
         super().__init__(config=config)
         self.lr = lr
@@ -323,7 +282,6 @@ class HMNetForSQuAD(HMNetForCausalLM, L.LightningModule):
         self.pad_token_id = pad_token_id
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=self.pad_token_id)
         self.aux_criterion = torch.nn.BCEWithLogitsLoss()
-        self.aux_loss_weight = aux_loss_weight
 
     def _compute_loss(
         self,
@@ -343,190 +301,34 @@ class HMNetForSQuAD(HMNetForCausalLM, L.LightningModule):
         )
         return loss
 
-    def _compute_auxiliary_loss(
-        self,
-        routing_outputs: list[RoutingModuleOutput],
-        chunked_attn_logits: list[torch.Tensor],
-        attn_label: torch.Tensor,
-        pad_mask: torch.Tensor,
-    ):
-        chunked_attn_labels = ChunkAttnScoreProfiler.chunk_all_stage(
-            attn_label, routing_outputs
-        )
-        chunked_pad_masks = ChunkAttnScoreProfiler.chunk_all_stage(
-            pad_mask.bool().unsqueeze(-1) & pad_mask.bool().unsqueeze(-2),
-            routing_outputs,
+    def common_step(self, batch: QAInput, batch_idx: int):
+        outputs: CausalLMOutput = self(batch.input_ids, mask=batch.pad_masks)
+        return self._compute_loss(
+            logits=outputs.logits,
+            input_ids=batch.input_ids.long(),
+            answer_mask=batch.answer_masks,
+            pad_mask=batch.pad_masks,
         )
 
-        total_loss = torch.tensor(0.0, device=pad_mask.device)
-        for logit, al, pm, ws in zip(
-            chunked_attn_logits,
-            chunked_attn_labels,
-            chunked_pad_masks,
-            self.config.decoder_attn_cfg.window_size,
-        ):
-            causal_mask_without_sliding_window = torch.ones_like(pm).tril(-ws)
-            valid_mask = pm & causal_mask_without_sliding_window
+    def training_step(self, batch: QAInput, batch_idx: int):
+        loss = self.common_step(batch, batch_idx)
+        self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
+        return loss
 
-            valid_zeros = valid_mask & ~al.bool()
-            total_loss += self.aux_criterion(
-                logit[valid_zeros], al[valid_zeros].float()
-            )
-            valid_ones = valid_mask & al.bool()
-            num_top_10_pct: int = max(1, valid_ones.sum().item() // 10)  # 최소 1개
-            num_bottom_50_pct: int = max(1, valid_ones.sum().item() // 2)
-            valid_preds_ones = logit[valid_ones]
-            if valid_preds_ones.numel() == 0:
-                continue
-            preds_top_10_pct_ones = valid_preds_ones.topk(num_top_10_pct).values
-            total_loss += self.aux_criterion(
-                preds_top_10_pct_ones,
-                torch.ones_like(preds_top_10_pct_ones, dtype=torch.float32),
-            )
-            if valid_ones.sum().item() > 1:
-                preds_bottom_50_pct_ones = valid_preds_ones.topk(
-                    num_bottom_50_pct, largest=False
-                ).values
-                total_loss += self.aux_criterion(
-                    preds_bottom_50_pct_ones,
-                    torch.zeros_like(preds_bottom_50_pct_ones, dtype=torch.float32),
-                )
-
-        return (
-            total_loss
-            if total_loss.isfinite()
-            else torch.tensor(0.0, device=pad_mask.device)
-        )
-
-    # def _compute_auxiliary_loss(
-    #     self,
-    #     chunk_attn_logit: torch.Tensor,
-    #     attn_label: torch.Tensor,
-    #     pad_mask: torch.Tensor,
-    # ):
-    #     # chunk_attn_score: (S,B,L,L) or (B,L,L)
-    #     # attn_label: (B,L,L)
-    #     # pad_mask: (B,L)
-
-    #     preds = chunk_attn_logit.float()
-    #     targets = attn_label.bool()
-
-    #     if preds.dim() == 3:
-    #         preds = preds.unsqueeze(0)  # (S,B,L,L)
-    #     targets = targets.unsqueeze(0).repeat(preds.size(0), 1, 1, 1)  # (S,B,L,L)
-
-    #     pad_mask = pad_mask.bool()
-    #     valid_mask = (
-    #         (pad_mask.unsqueeze(-1) & pad_mask.unsqueeze(-2))
-    #         .unsqueeze(0)
-    #         .repeat(preds.size(0), 1, 1, 1)
-    #     )
-    #     L = pad_mask.size(1)
-    #     causal_mask = torch.ones(L, L, dtype=torch.bool, device=pad_mask.device).tril()
-    #     valid_mask = valid_mask & causal_mask  # (S,B,L,L)
-    #     valid_zeros = valid_mask & ~targets.bool()
-    #     loss = self.aux_criterion(preds[valid_zeros], targets[valid_zeros].float())
-
-    #     valid_ones = valid_mask & targets.bool()
-    #     for i, ws in enumerate(self.config.decoder_attn_cfg.window_size[:-1]):
-    #         causal_without_sliding_window = torch.ones(
-    #             L, L, dtype=torch.bool, device=pad_mask.device
-    #         ).tril(-ws)
-    #         valid_ones[i] = valid_ones[i] & causal_without_sliding_window
-
-    #     valid_preds_ones = preds[valid_ones]
-    #     num_top_10_pct: int = max(1, valid_ones.sum().item() // 10)  # 최소 1개
-    #     num_bottom_50_pct: int = max(1, valid_ones.sum().item() // 2)
-    #     preds_top_10_pct_ones = valid_preds_ones.topk(num_top_10_pct).values
-    #     loss += self.aux_criterion(
-    #         preds_top_10_pct_ones,
-    #         torch.ones_like(preds_top_10_pct_ones, dtype=torch.float32),
-    #     )
-    #     preds_bottom_50_pct_ones = valid_preds_ones.topk(
-    #         num_bottom_50_pct, largest=False
-    #     ).values
-    #     loss += self.aux_criterion(
-    #         preds_bottom_50_pct_ones,
-    #         torch.zeros_like(preds_bottom_50_pct_ones, dtype=torch.float32),
-    #     )
-
-    #     return loss
-
-    def training_step(self, batch, batch_idx: int):
-        input_ids = batch["input_ids"]
-        attn_label = batch["attn_label"]
-        answer_mask = batch["answer_mask"]
-        pad_mask = batch.get("mask", None)
-
-        outputs: CausalLMOutput = self(input_ids, mask=pad_mask)
-        dechunk_attn_scores = ChunkAttnScoreProfiler.dechunk_all_stage(
-            outputs.chunk_attn_logit_output, outputs.bpred_output
-        )
-
-        loss = self._compute_loss(
-            outputs.logits, input_ids.long(), pad_mask, answer_mask
-        )
-        aux_loss = self._compute_auxiliary_loss(
-            routing_outputs=outputs.bpred_output,
-            chunked_attn_logits=outputs.chunk_attn_logit_output,
-            attn_label=attn_label,
-            pad_mask=pad_mask,
-        )
-        total = loss + self.aux_loss_weight * aux_loss
-
-        self.log("lm_loss", loss, prog_bar=False, on_step=True, on_epoch=True)
-        self.log("aux_loss", aux_loss, prog_bar=False, on_step=True, on_epoch=True)
-        self.log("train_loss", total, prog_bar=True, on_step=True, on_epoch=True)
-        return total
-
-    def validation_step(self, batch, batch_idx: int):
-        input_ids = batch["input_ids"]
-        attn_2d = batch.get("attn_label", None)
-        pad_mask = batch.get("mask", None)
-        answer_mask = batch.get("answer_mask", None)
-        outputs: CausalLMOutput = self(input_ids, attention_mask=attn_2d, mask=pad_mask)
-        logits = outputs.logits
-        loss = self._compute_loss(logits, input_ids.long(), pad_mask, answer_mask)
-        loss_aux = self._compute_auxiliary_loss(
-            attn_label=attn_2d,
-            pad_mask=pad_mask,
-            chunked_attn_logits=outputs.chunk_attn_logit_output,
-            routing_outputs=outputs.bpred_output,
-        )
-        self.log("val_lmloss", loss, prog_bar=False, on_step=False, on_epoch=True)
-        self.log("val_aux_loss", loss_aux, prog_bar=False, on_step=False, on_epoch=True)
-        loss = loss + loss_aux
+    def validation_step(self, batch: QAInput, batch_idx: int):
+        loss = self.common_step(batch, batch_idx)
         self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
         return {"val_loss": loss}
 
-    def predict_step(self, batch, batch_idx: int):
-        input_ids = batch["input_ids"]
-        attn_2d = batch.get("attn_label", None)
-        pad_mask = batch.get("mask", None)
-        outputs = self(input_ids, attention_mask=attn_2d, mask=pad_mask)
-        logits = outputs[0] if isinstance(outputs, (list, tuple)) else outputs
-        return {"logits": logits, "input_ids": input_ids}
+    def predict_step(self, batch: QAInput, batch_idx: int):
+        outputs = self(batch.input_ids, mask=batch.pad_masks)
+        return {"outputs": outputs}
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
         return optimizer
-
-
-def random_split_list(data: list, val_size: float = 0.1, seed: int = 42):
-    """
-    data 리스트를 랜덤 셔플 후 (1 - val_size) / val_size 로 분할.
-    """
-    if not 0.0 < val_size < 1.0:
-        raise ValueError("val_size must be between 0 and 1.")
-    rng = random.Random(seed)
-    data_copy = data[:]  # 원본 보존
-    rng.shuffle(data_copy)
-    n_val = max(1, int(len(data_copy) * val_size))
-    val = data_copy[:n_val]
-    train = data_copy[n_val:]
-    return train, val
 
 
 if __name__ == "__main__":
@@ -536,14 +338,16 @@ if __name__ == "__main__":
         type=str,
         required=False,
         help="Path to model config file",
-        default="configs/hmnet_3stage_XL.yaml",
+        # default="configs/hmnet_3stage_XL.yaml",
+        default="configs/hmnet_1stage_L.yaml",
     )
     parser.add_argument(
         "--model_path",
         type=str,
         required=False,
         help="Path to model file",
-        default="ckpts/hmnet_3stage_XL_from_2stage_XL.pt",
+        # default="ckpts/hmnet_3stage_XL_from_2stage_XL.pt",
+        default=None,
     )
     parser.add_argument(
         "--batch_size",
@@ -579,34 +383,32 @@ if __name__ == "__main__":
         lr=args.learning_rate,
         weight_decay=0.0,
         pad_token_id=0,
-        aux_loss_weight=1.0,
     )
-    if Path(args.model_path).exists():
+    if args.model_path is not None and Path(args.model_path).exists():
         model.load_state_dict(torch.load(args.model_path), strict=False)
 
-    squad_data: list[dict] = load_SQuAD_json()
-    train_data, val_data = random_split_list(squad_data, val_size=0.1, seed=42)
-    train_squad_examples = get_SQuAD_examples(train_data)
-    val_squad_examples = get_SQuAD_examples(val_data)
+    data = load_SQuAD_json()
+    train_squad_examples = SQuADExample.get_SQuAD_examples(data["train"])
+    train_dataset = QATripletDataset(train_squad_examples, samples_per_epoch=5000)
 
-    eda_squad(train_squad_examples)
-    train_input_ids_list = generate_qa_input_ids(train_squad_examples)
-    train_dataset = QAGeneratorDataset(train_input_ids_list, samples_per_epoch=5000)
-
-    val_input_ids_list = generate_qa_input_ids(val_squad_examples)
-    val_dataset = QAGeneratorDataset(val_input_ids_list, samples_per_epoch=500)
+    val_squad_examples = SQuADExample.get_SQuAD_examples(
+        data["dev"], max_question_len=4096, max_answer_len=4096
+    )
+    val_input_ids_list = QAInput.get_qa_inputs(val_squad_examples)
+    val_dataset = QADataset(val_input_ids_list)
 
     data_module = QADataModule(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
-        batch_size=args.batch_size,
+        train_batch_size=args.batch_size,
+        val_batch_size=1,
     )
 
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss",
         dirpath="checkpoints",
         filename="hmnet-squad-{epoch:02d}-{val_loss:.2f}",
-        save_top_k=1,
+        save_top_k=3,
         mode="min",
     )
 
@@ -620,5 +422,5 @@ if __name__ == "__main__":
     trainer.fit(
         model,
         datamodule=data_module,
-        ckpt_path="checkpoints/hmnet-squad-epoch=13-val_loss=0.25.ckpt",
+        # ckpt_path="checkpoints/hmnet-squad-epoch=13-val_loss=0.25.ckpt",
     )
