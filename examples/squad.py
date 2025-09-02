@@ -2,7 +2,7 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from turtle import right
+from typing import ClassVar
 
 import lightning as L
 import requests
@@ -67,17 +67,14 @@ class SQuADExample:
                     if len(question) > max_question_len:
                         continue
                     is_impossible = qa["is_impossible"]
-                    if is_impossible:
-                        answers = qa["plausible_answers"]
-                    else:
-                        answers = qa["answers"]
+                    answers = qa["answers"]
                     if use_one_answer and len(answers) > 0:
                         answers = answers[:1]
                     for ans in answers:
                         ans_text = ans["text"]
                         if len(ans_text) > max_answer_len:
                             continue
-                        elif is_impossible:
+                        if is_impossible:
                             ans_text = "no answer"
                         squad_examples.append(
                             SQuADExample(
@@ -99,6 +96,11 @@ class QAInput:
     answer_masks: torch.Tensor
     pad_masks: torch.Tensor
     qa_ids: list[str]
+    SYSTEM_PROMPT: ClassVar[Tensor] = byte_tokenizer.encode(
+        ["find a answer in context : "]
+    )[0]
+    QUESTION_PROMPT: ClassVar[Tensor] = byte_tokenizer.encode([" / question: "])[0]
+    ANSWER_PROMPT: ClassVar[Tensor] = byte_tokenizer.encode([" / answer: "])[0]
 
     @classmethod
     def get_qa_inputs(cls, squad_examples: list[SQuADExample]) -> list["QAInput"]:
@@ -106,7 +108,17 @@ class QAInput:
         for ex in squad_examples:
             answer_ids = ex.answer
 
-            input_ids = torch.cat([ex.context, ex.question, answer_ids], dim=0)
+            input_ids = torch.cat(
+                [
+                    cls.SYSTEM_PROMPT,
+                    ex.context,
+                    cls.QUESTION_PROMPT,
+                    ex.question,
+                    cls.ANSWER_PROMPT,
+                    answer_ids,
+                ],
+                dim=0,
+            )
             input_ids = byte_tokenizer.add_special_tokens(input_ids, bos=True, eos=True)
             answer_mask = torch.zeros_like(input_ids, dtype=torch.bool)
             answer_mask[-(answer_ids.size(0) + 1) :] = True  # answer + EOS
@@ -135,6 +147,10 @@ class QADataset(Dataset):
 
 
 class QATripletDataset(IterableDataset):
+    SYSTEM_PROMPT: Tensor = byte_tokenizer.encode(["find a answer in context : "])[0]
+    QUESTION_PROMPT: Tensor = byte_tokenizer.encode([" / question: "])[0]
+    ANSWER_PROMPT: Tensor = byte_tokenizer.encode([" / answer: "])[0]
+
     def __init__(
         self,
         squad_examples: list[SQuADExample],
@@ -210,27 +226,29 @@ class QATripletDataset(IterableDataset):
         selected_data = [self.data[i] for i in indices]
         qa_example = self.data[indices[selected_qa_index]]
 
-        qa = torch.cat([qa_example.question, qa_example.answer], dim=0)
         contexts = [
             self._crop_context(d.context, d.answer_start, d.answer.size(0))
             for d in selected_data
         ]
         context_lens = [c.size(0) for c in contexts]
 
-        tokens = torch.cat([*contexts, qa], dim=0)
+        tokens = torch.cat(
+            [
+                self.SYSTEM_PROMPT,
+                *contexts,
+                self.QUESTION_PROMPT,
+                qa_example.question,
+                self.ANSWER_PROMPT,
+                qa_example.answer,
+            ],
+            dim=0,
+        )
         tokens: torch.Tensor = byte_tokenizer.add_special_tokens(
             tokens, bos=True, eos=True
         )
 
         answer_mask = torch.zeros_like(tokens, dtype=torch.bool)
-        a_slice = slice(
-            sum(context_lens) + qa_example.question.size(0),
-            sum(context_lens)
-            + qa_example.question.size(0)
-            + qa_example.answer.size(0)
-            + 1,
-        )  # +1 for EOS
-        answer_mask[a_slice] = True
+        answer_mask[-(qa_example.answer.size(0) + 1) :] = True
 
         return QAInput(
             input_ids=tokens,
@@ -318,7 +336,6 @@ class HMNetForSQuAD(HMNetForCausalLM, L.LightningModule):
         self.weight_decay = weight_decay
         self.pad_token_id = pad_token_id
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=self.pad_token_id)
-        self.aux_criterion = torch.nn.BCEWithLogitsLoss()
 
     def _compute_loss(
         self,
@@ -354,7 +371,13 @@ class HMNetForSQuAD(HMNetForCausalLM, L.LightningModule):
 
     def validation_step(self, batch: QAInput, batch_idx: int):
         loss = self.common_step(batch, batch_idx)
-        self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log(
+            "val_loss",
+            loss,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+        )
         return {"val_loss": loss}
 
     def predict_step(self, batch: QAInput, batch_idx: int):
