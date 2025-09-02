@@ -226,9 +226,9 @@ class HMNet(nn.Module):
         )
 
         chunk_attn_logit = self.chunk_attn_score_module(
-            hidden_states,
+            torch.cat([hidden_states[..., 1:, :], residual[..., -1:, :]], dim=-2),
             inference_params=inference_params.chunk_attn_score_state,
-            mask=next_mask,  # FIXME
+            mask=next_mask,
         )
         chunk_attn_score = chunk_attn_logit.softmax(dim=-1)
 
@@ -315,6 +315,10 @@ class HMNet(nn.Module):
             prev_boundary_predictions = []
             prev_chunk_attn_scores = []
 
+        if hidden_states_inner.shape[0] > 0:
+            hidden_states_inner = torch.cat(
+                [hidden_states_inner[..., 1:, :], residual[..., -1:, :]], dim=-2
+            )
         chunk_attn_logit = self.chunk_attn_score_module.step(
             hidden_states_inner, inference_params.chunk_attn_score_state
         )

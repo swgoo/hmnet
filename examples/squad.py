@@ -403,7 +403,7 @@ if __name__ == "__main__":
         type=int,
         required=False,
         help="Batch size for training",
-        default=2,
+        default=4,
     )
     parser.add_argument(
         "--learning_rate",
@@ -424,14 +424,14 @@ if __name__ == "__main__":
         type=int,
         required=False,
         help="Maximum context length for training",
-        default=1024,
+        default=512,
     )
     parser.add_argument(
         "--train_batches",
         type=int,
         required=False,
         help="Number of training batches",
-        default=6000,
+        default=10_000,
     )
 
     args = parser.parse_args()
@@ -459,7 +459,7 @@ if __name__ == "__main__":
     )
 
     val_squad_examples = SQuADExample.get_SQuAD_examples(
-        data["dev"][:10],
+        data["dev"][:5],
         max_question_len=4096,
         max_answer_len=4096,
         use_one_answer=True,
@@ -500,5 +500,5 @@ if __name__ == "__main__":
     trainer.fit(
         model,
         datamodule=data_module,
-        ckpt_path="checkpoints/hmnet-squad-train-epoch=52-train_loss=0.13.ckpt",
+        # ckpt_path="checkpoints/hmnet-squad-train-epoch=52-train_loss=0.13.ckpt",
     )
