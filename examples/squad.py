@@ -138,16 +138,37 @@ class QATripletDataset(IterableDataset):
     def __init__(
         self,
         squad_examples: list[SQuADExample],
-        seed=42,
-        samples_per_epoch=5000,
         max_context_length=512,
+        seed: int = 42,
+        steps_per_epoch: int = 6000,  # 추가: 한 epoch 당 생성할 샘플 수 (= batches 수 * batch_size)
     ):
         self.data: list[SQuADExample] = squad_examples
-        self.seed = seed
-        self._rng = torch.Generator().manual_seed(seed)
         self._len = len(squad_examples)
-        self.samples_per_epoch = samples_per_epoch
         self.max_context_length = max_context_length
+        self.base_seed = seed
+        self.steps_per_epoch = steps_per_epoch
+        self.epoch = 0
+        self.rank = 0
+        self.world_size = 1
+        # per-process(또는 싱글) 기본 generator
+        self._rng = torch.Generator()
+        self._reset_rng()
+
+    def set_epoch(self, epoch: int, rank: int = 0, world_size: int = 1):
+        """
+        DDP 각 rank에서 매 epoch 호출.
+        """
+        self.epoch = epoch
+        self.rank = rank
+        self.world_size = world_size
+        self._reset_rng()
+
+    def _reset_rng(self):
+        # 서로 다른 rank/worker/epoch 조합마다 고유 seed
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
+        seed = self.base_seed + self.epoch * 10_000 + self.rank * 1_000 + worker_id
+        self._rng.manual_seed(seed)
 
     def _crop_context(
         self, context_ids: Tensor, answer_start: int, answer_len: int
@@ -181,9 +202,6 @@ class QATripletDataset(IterableDataset):
         window_end = min(len(context_ids), answer_start + right)
 
         return context_ids[window_start:window_end]
-
-    def __len__(self):
-        return self.samples_per_epoch
 
     def _sample_triplet(self):
         indices = torch.randint(0, self._len, (3,), generator=self._rng)
@@ -221,8 +239,14 @@ class QATripletDataset(IterableDataset):
             qa_ids=[qa_example.qa_id],
         )
 
+    def __len__(self):
+        # 한 epoch 에 생성할 "샘플" 수 (DataLoader 가 batch_size 로 묶음)
+        return self.steps_per_epoch
+
     def __iter__(self):
-        for _ in range(self.samples_per_epoch):
+        # DataLoader(worker) 재시작 시 epoch seed 반영
+        self._reset_rng()
+        for _ in range(self.steps_per_epoch):
             yield self._sample_triplet()
 
 
@@ -344,6 +368,18 @@ class HMNetForSQuAD(HMNetForCausalLM, L.LightningModule):
         return optimizer
 
 
+# (옵션) Lightning Callback 추가 (trainer 생성 부분 위 또는 별도 파일)
+class EpochSeedCallback(L.Callback):
+    def on_train_epoch_start(self, trainer, pl_module):
+        ds = trainer.datamodule.train_dataset
+        if hasattr(ds, "set_epoch"):
+            ds.set_epoch(
+                trainer.current_epoch,
+                getattr(trainer, "global_rank", 0),
+                getattr(trainer, "world_size", 1),
+            )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train HMNet model")
     parser.add_argument(
@@ -388,14 +424,14 @@ if __name__ == "__main__":
         type=int,
         required=False,
         help="Maximum context length for training",
-        default=1500,
+        default=1024,
     )
     parser.add_argument(
-        "--train_samples",
+        "--train_batches",
         type=int,
         required=False,
-        help="Number of training samples",
-        default=12000,
+        help="Number of training batches",
+        default=6000,
     )
 
     args = parser.parse_args()
@@ -418,8 +454,8 @@ if __name__ == "__main__":
     train_squad_examples = SQuADExample.get_SQuAD_examples(data["train"])
     train_dataset = QATripletDataset(
         train_squad_examples,
-        samples_per_epoch=args.train_samples,
         max_context_length=args.max_context_length,
+        steps_per_epoch=args.train_batches,
     )
 
     val_squad_examples = SQuADExample.get_SQuAD_examples(
@@ -457,12 +493,12 @@ if __name__ == "__main__":
     trainer = L.Trainer(
         max_epochs=args.num_epochs,
         accelerator="cuda" if torch.cuda.is_available() else "cpu",
-        callbacks=[checkpoint_callback, train_checkpoint_callback],
+        callbacks=[checkpoint_callback, train_checkpoint_callback, EpochSeedCallback()],
         precision="bf16",
     )
 
     trainer.fit(
         model,
         datamodule=data_module,
-        ckpt_path="checkpoints/hmnet-squad-train-epoch=51-train_loss=0.13.ckpt",
+        ckpt_path="checkpoints/hmnet-squad-train-epoch=52-train_loss=0.13.ckpt",
     )
