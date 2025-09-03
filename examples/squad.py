@@ -2,12 +2,14 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import lightning as L
 import requests
 import torch
 import torch.nn.functional as F
+from hnet.models.config_hnet import HNetConfig
+from hnet.models.mixer_seq import HNetForCausalLM
 from lightning.pytorch.callbacks import ModelCheckpoint
 from omegaconf import OmegaConf
 from torch import Tensor
@@ -392,7 +394,18 @@ class HMNetForSQuAD(HMNetForCausalLM, L.LightningModule):
 
 
 class HNetForSQuAD(HNetForCausalLM, HMNetForSQuAD):
-    pass
+    def __init__(
+        self,
+        config: HNetConfig,
+        lr: float = 1e-3,
+        weight_decay: float = 0.0,
+        pad_token_id: int = 0,
+    ):
+        super().__init__(config=config)
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.pad_token_id = pad_token_id
+        self.criterion = torch.nn.CrossEntropyLoss(ignore_index=self.pad_token_id)
 
 
 class EpochSeedCallback(L.Callback):
@@ -466,20 +479,41 @@ if __name__ == "__main__":
         help="Path to checkpoint file",
         default=None,
     )
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        required=False,
+        help="Model type to use, HMnet or HNet",
+        default="HMnet",
+    )
 
     args = parser.parse_args()
 
-    model_cfg = OmegaConf.load(args.model_config)
-    default_model_cfg = OmegaConf.structured(HMNetConfig)
-    merged_model_cfg = OmegaConf.merge(default_model_cfg, model_cfg)
-    model_config: HMNetConfig = OmegaConf.to_object(merged_model_cfg)
+    if args.model_type == "HMNet":
+        model_cfg = OmegaConf.load(args.model_config)
+        default_model_cfg = OmegaConf.structured(HMNetConfig)
+        merged_model_cfg = OmegaConf.merge(default_model_cfg, model_cfg)
+        model_config: HMNetConfig = OmegaConf.to_object(merged_model_cfg)
+        model = HMNetForSQuAD(
+            config=model_config,
+            lr=args.learning_rate,
+            weight_decay=0.0,
+            pad_token_id=0,
+        )
+    elif args.model_type == "HNet":
+        model_cfg = OmegaConf.load(args.model_config)
+        default_model_cfg = OmegaConf.structured(HNetConfig)
+        merged_model_cfg = OmegaConf.merge(default_model_cfg, model_cfg)
+        model_config: HNetConfig = OmegaConf.to_object(merged_model_cfg)
+        model = HNetForSQuAD(
+            config=model_config,
+            lr=args.learning_rate,
+            weight_decay=0.0,
+            pad_token_id=0,
+        )
+    else:
+        raise ValueError("model_type must be HMNet or HNet")
 
-    model = HMNetForSQuAD(
-        config=model_config,
-        lr=args.learning_rate,
-        weight_decay=0.0,
-        pad_token_id=0,
-    )
     if args.model_path is not None and Path(args.model_path).exists():
         model.load_state_dict(torch.load(args.model_path), strict=False)
 
@@ -510,7 +544,7 @@ if __name__ == "__main__":
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss",
         dirpath="checkpoints",
-        filename="hmnet-squad-{epoch:02d}-{val_loss:.2f}",
+        filename=f"{args.model_type}-squad-{{epoch:02d}}-{{val_loss:.2f}}",
         save_top_k=3,
         mode="min",
     )
@@ -518,7 +552,7 @@ if __name__ == "__main__":
     train_checkpoint_callback = ModelCheckpoint(
         monitor="train_loss",
         dirpath="checkpoints",
-        filename="hmnet-squad-train-{epoch:02d}-{train_loss:.2f}",
+        filename=f"{args.model_type}-squad-train-{{epoch:02d}}-{{train_loss:.2f}}",
         save_top_k=3,
         mode="min",
     )
