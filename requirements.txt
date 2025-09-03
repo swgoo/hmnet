@@ -10,3 +10,4 @@ omegaconf
 optree
 pandas
 pytest
+typer

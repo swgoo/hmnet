@@ -1,4 +1,3 @@
-import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +7,7 @@ import lightning as L
 import requests
 import torch
 import torch.nn.functional as F
+import typer
 from hnet.models.config_hnet import HNetConfig
 from hnet.models.mixer_seq import HNetForCausalLM
 from lightning.pytorch.callbacks import ModelCheckpoint
@@ -21,6 +21,7 @@ from hmnet.models.hmnet import CausalLMOutput, HMNetForCausalLM
 from hmnet.models.tokenizer import ByteTokenizer
 
 byte_tokenizer = ByteTokenizer()
+app = typer.Typer()
 
 
 def load_SQuAD_json(
@@ -260,11 +261,9 @@ class QATripletDataset(IterableDataset):
         )
 
     def __len__(self):
-        # 한 epoch 에 생성할 "샘플" 수 (DataLoader 가 batch_size 로 묶음)
         return self.steps_per_epoch
 
     def __iter__(self):
-        # DataLoader(worker) 재시작 시 epoch seed 반영
         self._reset_rng()
         for _ in range(self.steps_per_epoch):
             yield self._sample_triplet()
@@ -419,110 +418,55 @@ class EpochSeedCallback(L.Callback):
             )
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train HMNet model")
-    parser.add_argument(
-        "--model_config",
-        type=str,
-        required=False,
-        help="Path to model config file",
-        default="configs/hmnet_3stage_XL.yaml",
-        # default="configs/hmnet_1stage_L.yaml",
-    )
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        required=False,
-        help="Path to model file",
-        default="ckpts/hmnet_3stage_XL_from_2stage_XL.pt",
-        # default=None,
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        required=False,
-        help="Batch size for training",
-        default=4,
-    )
-    parser.add_argument(
-        "--learning_rate",
-        type=float,
-        required=False,
-        help="Learning rate for training",
-        default=1e-4,
-    )
-    parser.add_argument(
-        "--num_epochs",
-        type=int,
-        required=False,
-        help="Number of training epochs",
-        default=1_000_000,
-    )
-    parser.add_argument(
-        "--max_context_length",
-        type=int,
-        required=False,
-        help="Maximum context length for training",
-        default=512,
-    )
-    parser.add_argument(
-        "--train_batches",
-        type=int,
-        required=False,
-        help="Number of training batches",
-        default=10_000,
-    )
-    parser.add_argument(
-        "--ckpt_path",
-        type=str,
-        required=False,
-        help="Path to checkpoint file",
-        default=None,
-    )
-    parser.add_argument(
-        "--model_type",
-        type=str,
-        required=False,
-        help="Model type to use, HMnet or HNet",
-        default="HMnet",
-    )
-
-    args = parser.parse_args()
-
-    if args.model_type == "HMNet":
-        model_cfg = OmegaConf.load(args.model_config)
+@app.command()
+def main(
+    model_config: str,
+    model_path: str | None = None,
+    batch_size: int = 4,
+    learning_rate: float = 1e-4,
+    num_epochs: int = 1_000_000,
+    max_context_length: int = 512,
+    train_batches: int = 10_000,
+    ckpt_path: str | None = None,
+    model_type: str = "HMnet",
+):
+    """
+    Train HMNet or HNet model on SQuAD dataset.
+    """
+    if model_type == "HMNet":
+        model_cfg = OmegaConf.load(model_config)
         default_model_cfg = OmegaConf.structured(HMNetConfig)
         merged_model_cfg = OmegaConf.merge(default_model_cfg, model_cfg)
-        model_config: HMNetConfig = OmegaConf.to_object(merged_model_cfg)
+        model_config_obj: HMNetConfig = OmegaConf.to_object(merged_model_cfg)
         model = HMNetForSQuAD(
-            config=model_config,
-            lr=args.learning_rate,
+            config=model_config_obj,
+            lr=learning_rate,
             weight_decay=0.0,
             pad_token_id=0,
         )
-    elif args.model_type == "HNet":
-        model_cfg = OmegaConf.load(args.model_config)
+    elif model_type == "HNet":
+        model_cfg = OmegaConf.load(model_config)
         default_model_cfg = OmegaConf.structured(HNetConfig)
         merged_model_cfg = OmegaConf.merge(default_model_cfg, model_cfg)
-        model_config: HNetConfig = OmegaConf.to_object(merged_model_cfg)
+        model_config_obj: HNetConfig = OmegaConf.to_object(merged_model_cfg)
         model = HNetForSQuAD(
-            config=model_config,
-            lr=args.learning_rate,
+            config=model_config_obj,
+            lr=learning_rate,
             weight_decay=0.0,
             pad_token_id=0,
         )
     else:
         raise ValueError("model_type must be HMNet or HNet")
 
-    if args.model_path is not None and Path(args.model_path).exists():
-        model.load_state_dict(torch.load(args.model_path), strict=False)
+    if model_path is not None and Path(model_path).exists():
+        model.load_state_dict(torch.load(model_path), strict=False)
 
     data = load_SQuAD_json()
     train_squad_examples = SQuADExample.get_SQuAD_examples(data["train"])
     train_dataset = QATripletDataset(
         train_squad_examples,
-        max_context_length=args.max_context_length,
-        steps_per_epoch=args.train_batches,
+        max_context_length=max_context_length,
+        steps_per_epoch=train_batches,
     )
 
     val_squad_examples = SQuADExample.get_SQuAD_examples(
@@ -537,14 +481,14 @@ if __name__ == "__main__":
     data_module = QADataModule(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
-        train_batch_size=args.batch_size,
+        train_batch_size=batch_size,
         val_batch_size=1,
     )
 
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss",
         dirpath="checkpoints",
-        filename=f"{args.model_type}-squad-{{epoch:02d}}-{{val_loss:.2f}}",
+        filename=f"{model_type}-squad-{{epoch:02d}}-{{val_loss:.2f}}",
         save_top_k=3,
         mode="min",
     )
@@ -552,13 +496,13 @@ if __name__ == "__main__":
     train_checkpoint_callback = ModelCheckpoint(
         monitor="train_loss",
         dirpath="checkpoints",
-        filename=f"{args.model_type}-squad-train-{{epoch:02d}}-{{train_loss:.2f}}",
+        filename=f"{model_type}-squad-train-{{epoch:02d}}-{{train_loss:.2f}}",
         save_top_k=3,
         mode="min",
     )
 
     trainer = L.Trainer(
-        max_epochs=args.num_epochs,
+        max_epochs=num_epochs,
         accelerator="cuda" if torch.cuda.is_available() else "cpu",
         callbacks=[checkpoint_callback, train_checkpoint_callback, EpochSeedCallback()],
         precision="bf16",
@@ -567,5 +511,9 @@ if __name__ == "__main__":
     trainer.fit(
         model,
         datamodule=data_module,
-        ckpt_path=args.ckpt_path,
+        ckpt_path=ckpt_path,
     )
+
+
+if __name__ == "__main__":
+    app()

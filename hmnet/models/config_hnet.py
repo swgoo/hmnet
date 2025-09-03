@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Union
+from typing import Any, List, Union
 
 
 @dataclass
@@ -21,7 +21,7 @@ class SSMConfig:
 
 @dataclass
 class HNetConfig:
-    arch_layout: List[Union[str, List]] = field(default_factory=list)
+    arch_layout: List[Any] = field(default_factory=list)
     d_model: List[int] = field(default_factory=list)
     # intermediate dimension for the FFNs (0 indicates no FFN)
     d_intermediate: List[int] = field(default_factory=list)
