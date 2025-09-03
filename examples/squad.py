@@ -391,7 +391,10 @@ class HMNetForSQuAD(HMNetForCausalLM, L.LightningModule):
         return optimizer
 
 
-# (옵션) Lightning Callback 추가 (trainer 생성 부분 위 또는 별도 파일)
+class HNetForSQuAD(HNetForCausalLM, HMNetForSQuAD):
+    pass
+
+
 class EpochSeedCallback(L.Callback):
     def on_train_epoch_start(self, trainer, pl_module):
         ds = trainer.datamodule.train_dataset
@@ -455,6 +458,13 @@ if __name__ == "__main__":
         required=False,
         help="Number of training batches",
         default=10_000,
+    )
+    parser.add_argument(
+        "--ckpt_path",
+        type=str,
+        required=False,
+        help="Path to checkpoint file",
+        default=None,
     )
 
     args = parser.parse_args()
@@ -523,5 +533,5 @@ if __name__ == "__main__":
     trainer.fit(
         model,
         datamodule=data_module,
-        # ckpt_path="checkpoints/hmnet-squad-train-epoch=52-train_loss=0.13.ckpt",
+        ckpt_path=args.ckpt_path,
     )
