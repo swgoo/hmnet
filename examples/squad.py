@@ -8,7 +8,7 @@ import requests
 import torch
 import torch.nn.functional as F
 import typer
-from hnet.models.config_hnet import HNetConfig
+from hmnet.models.config_hnet import HNetConfig
 from hnet.models.mixer_seq import HNetForCausalLM
 from lightning.pytorch.callbacks import ModelCheckpoint
 from omegaconf import OmegaConf
@@ -392,10 +392,10 @@ class HMNetForSQuAD(HMNetForCausalLM, L.LightningModule):
         return optimizer
 
 
-class HNetForSQuAD(HNetForCausalLM, HMNetForSQuAD):
+class HNetForSQuAD(HNetForCausalLM, L.LightningModule):
     def __init__(
         self,
-        config: HNetConfig,
+        config: HMNetConfig,
         lr: float = 1e-3,
         weight_decay: float = 0.0,
         pad_token_id: int = 0,
@@ -405,6 +405,59 @@ class HNetForSQuAD(HNetForCausalLM, HMNetForSQuAD):
         self.weight_decay = weight_decay
         self.pad_token_id = pad_token_id
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=self.pad_token_id)
+
+    def _compute_loss(
+        self,
+        logits: torch.Tensor,
+        input_ids: torch.Tensor,
+        answer_mask: torch.Tensor,
+        pad_mask: torch.Tensor,
+    ):
+        # logits: (B, L, E)
+        shift_logits = logits[:, :-1, :].contiguous()  # (B, L-1, E)
+        shift_labels = input_ids[:, 1:].contiguous()  # (B, L-1)
+
+        shift_mask = pad_mask[:, 1:] & answer_mask[:, 1:]
+        shift_labels = shift_labels.masked_fill(~shift_mask, self.pad_token_id)
+        loss = self.criterion(
+            shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+        )
+        return loss
+
+    def common_step(self, batch: QAInput, batch_idx: int):
+        outputs: CausalLMOutput = self(batch.input_ids, mask=batch.pad_masks)
+        return self._compute_loss(
+            logits=outputs.logits,
+            input_ids=batch.input_ids.long(),
+            answer_mask=batch.answer_masks,
+            pad_mask=batch.pad_masks,
+        )
+
+    def training_step(self, batch: QAInput, batch_idx: int):
+        loss = self.common_step(batch, batch_idx)
+        self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
+        return loss
+
+    def validation_step(self, batch: QAInput, batch_idx: int):
+        loss = self.common_step(batch, batch_idx)
+        self.log(
+            "val_loss",
+            loss,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+        )
+        return {"val_loss": loss}
+
+    def predict_step(self, batch: QAInput, batch_idx: int):
+        outputs = self(batch.input_ids, mask=batch.pad_masks)
+        return {"outputs": outputs}
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        )
+        return optimizer
 
 
 class EpochSeedCallback(L.Callback):
