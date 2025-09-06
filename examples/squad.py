@@ -295,12 +295,22 @@ def qa_input_collate_fn(batch: list[QAInput]):
 
 
 class QADataModule(L.LightningDataModule):
-    def __init__(self, train_dataset, val_dataset, train_batch_size, val_batch_size):
+    def __init__(
+        self,
+        train_dataset,
+        val_dataset,
+        pred_dataset,
+        train_batch_size=4,
+        val_batch_size=1,
+        pred_batch_size=1,
+    ):
         super().__init__()
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
+        self.pred_dataset = pred_dataset
         self.train_batch_size = train_batch_size
         self.val_batch_size = val_batch_size
+        self.pred_batch_size = pred_batch_size
 
     def train_dataloader(self):
         return DataLoader(
@@ -318,8 +328,8 @@ class QADataModule(L.LightningDataModule):
 
     def predict_dataloader(self):
         return DataLoader(
-            self.val_dataset,
-            batch_size=self.val_batch_size,
+            self.pred_dataset,
+            batch_size=self.pred_batch_size,
             collate_fn=qa_input_collate_fn,
         )
 
@@ -475,7 +485,9 @@ class EpochSeedCallback(L.Callback):
 def main(
     model_config: str,
     model_path: str | None = None,
-    batch_size: int = 4,
+    train_batch_size: int = 4,
+    val_batch_size: int = 1,
+    pred_batch_size: int = 1,
     learning_rate: float = 1e-4,
     num_epochs: int = 1_000_000,
     max_context_length: int = 512,
@@ -531,17 +543,28 @@ def main(
     val_input_ids_list = QAInput.get_qa_inputs(val_squad_examples)
     val_dataset = QADataset(val_input_ids_list)
 
+    pred_squad_examples = SQuADExample.get_SQuAD_examples(
+        data["dev"],
+        max_question_len=10240,
+        max_answer_len=10240,
+        use_one_answer=True,
+    )
+    pred_input_ids_list = QAInput.get_qa_inputs(pred_squad_examples)
+    pred_dataset = QADataset(pred_input_ids_list)
+
     data_module = QADataModule(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
-        train_batch_size=batch_size,
-        val_batch_size=1,
+        pred_dataset=pred_dataset,
+        train_batch_size=train_batch_size,
+        val_batch_size=val_batch_size,
+        pred_batch_size=pred_batch_size,
     )
 
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss",
         dirpath="checkpoints",
-        filename=f"{model_type}-squad-{{epoch:02d}}-{{val_loss:.2f}}",
+        filename=f"{model_type}-squad-{Path(model_config).stem}-{{epoch:02d}}-{{val_loss:.2f}}",
         save_top_k=3,
         mode="min",
     )
@@ -549,7 +572,7 @@ def main(
     train_checkpoint_callback = ModelCheckpoint(
         monitor="train_loss",
         dirpath="checkpoints",
-        filename=f"{model_type}-squad-train-{{epoch:02d}}-{{train_loss:.2f}}",
+        filename=f"{model_type}-squad-train-{Path(model_config).stem}-{{epoch:02d}}-{{train_loss:.2f}}",
         save_top_k=3,
         mode="min",
     )
