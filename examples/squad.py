@@ -715,6 +715,8 @@ def predict(
     """
     Predict with HMNet or HNet model on SQuAD dataset.
     """
+    torch._dynamo.config.capture_scalar_outputs = True
+
     model, data_module = setup_model_and_data(
         model_config=model_config,
         model_path=model_path,

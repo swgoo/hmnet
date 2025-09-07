@@ -36,6 +36,8 @@ class ByteTokenizer:
     def decode(self, tokens, **kwargs):
         if isinstance(tokens, Tensor):
             tokens = tokens.tolist()
+        if "errors" not in kwargs:
+            kwargs["errors"] = "replace"
         return bytearray(tokens).decode("utf-8", **kwargs)
 
     def add_special_tokens(
