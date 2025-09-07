@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import ClassVar, Literal
 
@@ -391,9 +391,14 @@ class HMNetForSQuAD(HMNetForCausalLM, L.LightningModule):
         )
         return {"val_loss": loss}
 
-    def predict_step(self, batch: QAInput, batch_idx: int):
-        outputs = self(batch.input_ids, mask=batch.pad_masks)
-        return {"outputs": outputs}
+    def predict_step(self, batch: QAInput, batch_idx: int) -> dict:
+        results: CausalLMOutput = self.forward(batch.input_ids, mask=batch.pad_masks)
+        outputs = {}
+        outputs["logits"] = results.logits
+        outputs["qa_ids"] = batch.qa_ids
+        outputs["answer_masks"] = batch.answer_masks
+        outputs["pad_masks"] = batch.pad_masks
+        return outputs
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -459,9 +464,14 @@ class HNetForSQuAD(HNetForCausalLM, L.LightningModule):
         )
         return {"val_loss": loss}
 
-    def predict_step(self, batch: QAInput, batch_idx: int):
-        outputs = self(batch.input_ids, mask=batch.pad_masks)
-        return {"outputs": outputs}
+    def predict_step(self, batch: QAInput, batch_idx: int) -> dict:
+        results: CausalLMOutput = self.forward(batch.input_ids, mask=batch.pad_masks)
+        outputs = {}
+        outputs["logits"] = results.logits
+        outputs["qa_ids"] = batch.qa_ids
+        outputs["answer_masks"] = batch.answer_masks
+        outputs["pad_masks"] = batch.pad_masks
+        return outputs
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -481,23 +491,17 @@ class EpochSeedCallback(L.Callback):
             )
 
 
-@app.command()
-def main(
+def setup_model_and_data(
     model_config: str,
     model_path: str | None = None,
     train_batch_size: int = 4,
     val_batch_size: int = 1,
     pred_batch_size: int = 1,
     learning_rate: float = 1e-4,
-    num_epochs: int = 1_000_000,
     max_context_length: int = 512,
     train_batches: int = 10_000,
-    ckpt_path: str | None = None,
-    model_type: str = "HMnet",
+    model_type: str = "HMNet",
 ):
-    """
-    Train HMNet or HNet model on SQuAD dataset.
-    """
     if model_type == "HMNet":
         model_cfg = OmegaConf.load(model_config)
         default_model_cfg = OmegaConf.structured(HMNetConfig)
@@ -560,6 +564,37 @@ def main(
         val_batch_size=val_batch_size,
         pred_batch_size=pred_batch_size,
     )
+    return model, data_module
+
+
+@app.command()
+def train(
+    model_config: str,
+    model_path: str | None = None,
+    train_batch_size: int = 4,
+    val_batch_size: int = 1,
+    pred_batch_size: int = 1,
+    learning_rate: float = 1e-4,
+    num_epochs: int = 1_000_000,
+    max_context_length: int = 512,
+    train_batches: int = 10_000,
+    ckpt_path: str | None = None,
+    model_type: str = "HMNet",
+):
+    """
+    Train HMNet or HNet model on SQuAD dataset.
+    """
+    model, data_module = setup_model_and_data(
+        model_config=model_config,
+        model_path=model_path,
+        train_batch_size=train_batch_size,
+        val_batch_size=val_batch_size,
+        pred_batch_size=pred_batch_size,
+        learning_rate=learning_rate,
+        max_context_length=max_context_length,
+        train_batches=train_batches,
+        model_type=model_type,
+    )
 
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss",
@@ -588,6 +623,78 @@ def main(
         model,
         datamodule=data_module,
         ckpt_path=ckpt_path,
+    )
+
+
+@app.command()
+def validate(
+    model_config: str,
+    model_path: str | None = None,
+    ckpt_path: str | None = None,
+    val_batch_size: int = 1,
+    max_context_length: int = 512,
+    model_type: str = "HMNet",
+):
+    """
+    Validate HMNet or HNet model on SQuAD dataset.
+    """
+    model, data_module = setup_model_and_data(
+        model_config=model_config,
+        model_path=model_path,
+        train_batch_size=0,
+        val_batch_size=val_batch_size,
+        pred_batch_size=0,
+        learning_rate=0.0,
+        max_context_length=max_context_length,
+        train_batches=0,
+        model_type=model_type,
+    )
+    trainer = L.Trainer(
+        accelerator="cuda" if torch.cuda.is_available() else "cpu",
+        precision="bf16",
+    )
+    results = trainer.validate(model, datamodule=data_module, ckpt_path=ckpt_path)
+    print(results)
+
+
+@app.command()
+def predict(
+    model_config: str,
+    model_path: str | None = None,
+    ckpt_path: str | None = None,
+    predict_dir: str = "predictions",
+    pred_batch_size: int = 1,
+    max_context_length: int = 512,
+    model_type: str = "HMNet",
+):
+    """
+    Predict with HMNet or HNet model on SQuAD dataset.
+    """
+    model, data_module = setup_model_and_data(
+        model_config=model_config,
+        model_path=model_path,
+        train_batch_size=0,
+        val_batch_size=0,
+        pred_batch_size=pred_batch_size,
+        learning_rate=0.0,
+        max_context_length=max_context_length,
+        train_batches=0,
+        model_type=model_type,
+    )
+    trainer = L.Trainer(
+        accelerator="cuda" if torch.cuda.is_available() else "cpu",
+        precision="bf16",
+    )
+    results = trainer.predict(model, datamodule=data_module, ckpt_path=ckpt_path)
+    outputs: dict[str, list] = {}
+    for batch in results:
+        for k, v in batch.items():
+            if k not in outputs:
+                outputs[k] = []
+            outputs[k].extend(v if isinstance(v, list) else v.cpu().tolist())
+    torch.save(
+        outputs,
+        f"{predict_dir}/{model_type}-squad-predictions-{Path(model_config).stem}.pt",
     )
 
 
