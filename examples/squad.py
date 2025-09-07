@@ -687,12 +687,18 @@ class SavePredictionCallback(L.Callback):
         answer_file = open(self.answer_path, "a") if self.answer_path else None
         for i in range(batch_size):
             qa_id = qa_ids[i]
-
+            answer_masks_i = answer_masks[i].detach().cpu()
+            answer_masks_i = torch.cat(
+                [answer_masks_i, torch.ones(1, dtype=torch.bool)], dim=0
+            )
             predict_ids = logits[i].detach().argmax(dim=-1).cpu()
-            predict_ids = predict_ids[answer_masks[i]][:-1]  # remove EOS
-            answer_text = byte_tokenizer.decode(predict_ids)
+            predict_ids = predict_ids[answer_masks_i[1:]][:-2]  # remove EOS
+            answer_text: str = byte_tokenizer.decode(predict_ids)
+            answer_text = answer_text.replace(
+                '"', '\\"'
+            )  # JSON 형식에 맞게 이스케이프 처리
             if answer_file:
-                answer_file.write(f"{qa_id}:{answer_text},")
+                answer_file.write(f'"{qa_id}":"{answer_text}",')
         answer_file.close() if answer_file else None
 
     def on_predict_end(self, trainer, pl_module):
