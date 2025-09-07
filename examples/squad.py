@@ -72,6 +72,10 @@ class SQuADExample:
                         continue
                     is_impossible = qa["is_impossible"]
                     answers = qa["answers"]
+                    if len(answers) == 0:
+                        answers = [
+                            {"text": "no answer", "answer_start": len(context) // 2}
+                        ]
                     if use_one_answer and len(answers) > 0:
                         answers = answers[:1]
                     for ans in answers:
