@@ -105,7 +105,7 @@ class QAInput:
     pad_masks: torch.Tensor
     qa_ids: list[str]
     SYSTEM_PROMPT: ClassVar[Tensor] = byte_tokenizer.encode(
-        ["find a answer in context : "]
+        ["find an answer in context. If there is no answer, say no answer. : "]
     )[0]
     QUESTION_PROMPT: ClassVar[Tensor] = byte_tokenizer.encode([" / question: "])[0]
     ANSWER_PROMPT: ClassVar[Tensor] = byte_tokenizer.encode([" / answer: "])[0]
@@ -155,7 +155,9 @@ class QADataset(Dataset):
 
 
 class QATripletDataset(IterableDataset):
-    SYSTEM_PROMPT: Tensor = byte_tokenizer.encode(["find a answer in context : "])[0]
+    SYSTEM_PROMPT: Tensor = byte_tokenizer.encode(
+        ["find an answer in context. If there is no answer, say no answer. : "]
+    )[0]
     QUESTION_PROMPT: Tensor = byte_tokenizer.encode([" / question: "])[0]
     ANSWER_PROMPT: Tensor = byte_tokenizer.encode([" / answer: "])[0]
 
