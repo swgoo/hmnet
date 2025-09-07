@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import ClassVar, Literal
 
 import lightning as L
+import numpy as np
 import requests
 import torch
 import torch.nn.functional as F
@@ -657,6 +658,50 @@ def validate(
     print(results)
 
 
+class SavePredictionCallback(L.Callback):
+    def __init__(self, answer_path: str | None = None):
+        super().__init__()
+        from pathlib import Path
+
+        # self.output_dir = Path(output_dir)
+        # self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.answer_path = answer_path
+        if self.answer_path:
+            self.answer_path = Path(answer_path)
+            # 기존 파일이 있으면 삭제
+            self.answer_path.parent.mkdir(parents=True, exist_ok=True)
+            if self.answer_path.exists():
+                self.answer_path.unlink()
+            open(self.answer_path, "w").write("{")  # JSON 형식 시작
+
+    def on_predict_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0
+    ):
+        logits = outputs.get("logits", None)
+        answer_masks = outputs.get("answer_masks", None)
+        qa_ids = outputs.get("qa_ids", None)
+
+        batch_size = len(qa_ids)
+
+        answer_file = open(self.answer_path, "a") if self.answer_path else None
+        for i in range(batch_size):
+            qa_id = qa_ids[i]
+
+            predict_ids = logits[i].detach().argmax(dim=-1).cpu()
+            predict_ids = predict_ids[answer_masks[i]][:-1]  # remove EOS
+            answer_text = byte_tokenizer.decode(predict_ids)
+            if answer_file:
+                answer_file.write(f"{qa_id}:{answer_text},")
+        answer_file.close() if answer_file else None
+
+    def on_predict_end(self, trainer, pl_module):
+        if self.answer_path:
+            # JSON 형식 닫기
+            with open(self.answer_path, "a") as f:
+                f.write("}\n")
+
+
 @app.command()
 def predict(
     model_config: str,
@@ -681,21 +726,19 @@ def predict(
         train_batches=0,
         model_type=model_type,
     )
+    Path(predict_dir).mkdir(parents=True, exist_ok=True)
+    output_file = (
+        Path(predict_dir)
+        / f"{model_type}-squad-predictions-{Path(model_config).stem}.json"
+    )
+
+    save_callback = SavePredictionCallback(answer_path=str(output_file))
     trainer = L.Trainer(
         accelerator="cuda" if torch.cuda.is_available() else "cpu",
-        precision="bf16",
+        precision="32",
+        callbacks=[save_callback],
     )
-    results = trainer.predict(model, datamodule=data_module, ckpt_path=ckpt_path)
-    outputs: dict[str, list] = {}
-    for batch in results:
-        for k, v in batch.items():
-            if k not in outputs:
-                outputs[k] = []
-            outputs[k].extend(v if isinstance(v, list) else v.cpu().tolist())
-    torch.save(
-        outputs,
-        f"{predict_dir}/{model_type}-squad-predictions-{Path(model_config).stem}.pt",
-    )
+    trainer.predict(model, datamodule=data_module, ckpt_path=ckpt_path)
 
 
 if __name__ == "__main__":

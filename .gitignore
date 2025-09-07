@@ -5,6 +5,7 @@ logs/**
 lightning_logs/**
 checkpoints/**
 results/**
+predictions/**
 
 # temporary path
 **/.tmp
