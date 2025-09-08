@@ -753,7 +753,7 @@ def predict(
     save_callback = SavePredictionCallback(answer_path=str(output_file))
     trainer = L.Trainer(
         accelerator="cuda" if torch.cuda.is_available() else "cpu",
-        precision="32",
+        precision="32" if model_type == "HMNet" else "bf16",
         callbacks=[save_callback],
     )
     trainer.predict(model, datamodule=data_module, ckpt_path=ckpt_path)
