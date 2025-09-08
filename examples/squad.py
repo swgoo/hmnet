@@ -9,15 +9,16 @@ import requests
 import torch
 import torch.nn.functional as F
 import typer
-from hmnet.models.config_hnet import HNetConfig
 from hnet.models.mixer_seq import HNetForCausalLM
 from lightning.pytorch.callbacks import ModelCheckpoint
 from omegaconf import OmegaConf
+from pytorch_lightning.loggers import CSVLogger
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 from hmnet.models.config_hmnet import HMNetConfig
+from hmnet.models.config_hnet import HNetConfig
 from hmnet.models.hmnet import CausalLMOutput, HMNetForCausalLM
 from hmnet.models.tokenizer import ByteTokenizer
 
@@ -618,12 +619,15 @@ def train(
         save_top_k=3,
         mode="min",
     )
-
+    csv_logger = CSVLogger(
+        save_dir="logs", name=f"{model_type}-squad-{Path(model_config).stem}"
+    )
     trainer = L.Trainer(
         max_epochs=num_epochs,
         accelerator="cuda" if torch.cuda.is_available() else "cpu",
         callbacks=[checkpoint_callback, train_checkpoint_callback, EpochSeedCallback()],
         precision="bf16",
+        logger=[csv_logger],
     )
 
     trainer.fit(
