@@ -360,36 +360,41 @@ class HMNetForSQuAD(HMNetForCausalLM, L.LightningModule):
         self,
         logits: torch.Tensor,
         input_ids: torch.Tensor,
-        answer_mask: torch.Tensor,
         pad_mask: torch.Tensor,
+        answer_mask: torch.Tensor | None = None,
     ):
         # logits: (B, L, E)
         shift_logits = logits[:, :-1, :].contiguous()  # (B, L-1, E)
         shift_labels = input_ids[:, 1:].contiguous()  # (B, L-1)
 
-        shift_mask = pad_mask[:, 1:] & answer_mask[:, 1:]
+        shift_mask = pad_mask[:, 1:]
+        if answer_mask is not None:
+            shift_mask = pad_mask[:, 1:] & answer_mask[:, 1:]
         shift_labels = shift_labels.masked_fill(~shift_mask, self.pad_token_id)
         loss = self.criterion(
             shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
         )
         return loss
 
-    def common_step(self, batch: QAInput, batch_idx: int):
+    def training_step(self, batch: QAInput, batch_idx: int):
         outputs: CausalLMOutput = self(batch.input_ids, mask=batch.pad_masks)
-        return self._compute_loss(
+        loss = self._compute_loss(
+            logits=outputs.logits,
+            input_ids=batch.input_ids.long(),
+            answer_mask=None,
+            pad_mask=batch.pad_masks,
+        )
+        self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
+        return loss
+
+    def validation_step(self, batch: QAInput, batch_idx: int):
+        outputs: CausalLMOutput = self(batch.input_ids, mask=batch.pad_masks)
+        loss = self._compute_loss(
             logits=outputs.logits,
             input_ids=batch.input_ids.long(),
             answer_mask=batch.answer_masks,
             pad_mask=batch.pad_masks,
         )
-
-    def training_step(self, batch: QAInput, batch_idx: int):
-        loss = self.common_step(batch, batch_idx)
-        self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
-        return loss
-
-    def validation_step(self, batch: QAInput, batch_idx: int):
-        loss = self.common_step(batch, batch_idx)
         self.log(
             "val_loss",
             loss,
@@ -433,36 +438,41 @@ class HNetForSQuAD(HNetForCausalLM, L.LightningModule):
         self,
         logits: torch.Tensor,
         input_ids: torch.Tensor,
-        answer_mask: torch.Tensor,
         pad_mask: torch.Tensor,
+        answer_mask: torch.Tensor | None = None,
     ):
         # logits: (B, L, E)
         shift_logits = logits[:, :-1, :].contiguous()  # (B, L-1, E)
         shift_labels = input_ids[:, 1:].contiguous()  # (B, L-1)
 
-        shift_mask = pad_mask[:, 1:] & answer_mask[:, 1:]
+        shift_mask = pad_mask[:, 1:]
+        if answer_mask is not None:
+            shift_mask = pad_mask[:, 1:] & answer_mask[:, 1:]
         shift_labels = shift_labels.masked_fill(~shift_mask, self.pad_token_id)
         loss = self.criterion(
             shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
         )
         return loss
 
-    def common_step(self, batch: QAInput, batch_idx: int):
+    def training_step(self, batch: QAInput, batch_idx: int):
         outputs: CausalLMOutput = self(batch.input_ids, mask=batch.pad_masks)
-        return self._compute_loss(
+        loss = self._compute_loss(
+            logits=outputs.logits,
+            input_ids=batch.input_ids.long(),
+            answer_mask=None,
+            pad_mask=batch.pad_masks,
+        )
+        self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
+        return loss
+
+    def validation_step(self, batch: QAInput, batch_idx: int):
+        outputs: CausalLMOutput = self(batch.input_ids, mask=batch.pad_masks)
+        loss = self._compute_loss(
             logits=outputs.logits,
             input_ids=batch.input_ids.long(),
             answer_mask=batch.answer_masks,
             pad_mask=batch.pad_masks,
         )
-
-    def training_step(self, batch: QAInput, batch_idx: int):
-        loss = self.common_step(batch, batch_idx)
-        self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
-        return loss
-
-    def validation_step(self, batch: QAInput, batch_idx: int):
-        loss = self.common_step(batch, batch_idx)
         self.log(
             "val_loss",
             loss,
