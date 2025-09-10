@@ -625,8 +625,8 @@ def train(
     train_checkpoint_callback = ModelCheckpoint(
         monitor="train_loss",
         dirpath="checkpoints",
-        filename=f"{model_type}-squad-train-{Path(model_config).stem}-{{epoch:02d}}-{{train_loss:.2f}}",
-        save_top_k=3,
+        filename=f"{model_type}-squad-{Path(model_config).stem}-{{epoch:02d}}-{{train_loss:.2f}}",
+        save_top_k=1,
         mode="min",
     )
     csv_logger = CSVLogger(
