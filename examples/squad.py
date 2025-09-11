@@ -618,7 +618,7 @@ def train(
         monitor="val_loss",
         dirpath="checkpoints",
         filename=f"{model_type}-squad-{Path(model_config).stem}-{{epoch:02d}}-{{val_loss:.2f}}",
-        save_top_k=3,
+        save_top_k=1,
         mode="min",
     )
 
