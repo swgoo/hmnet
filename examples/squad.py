@@ -618,7 +618,7 @@ def train(
         monitor="val_loss",
         dirpath="checkpoints",
         filename=f"{model_type}-squad-{Path(model_config).stem}-{{epoch:02d}}-{{val_loss:.2f}}",
-        save_top_k=1,
+        save_top_k=2,
         mode="min",
     )
 
@@ -626,7 +626,7 @@ def train(
         monitor="train_loss",
         dirpath="checkpoints",
         filename=f"{model_type}-squad-{Path(model_config).stem}-{{epoch:02d}}-{{train_loss:.2f}}",
-        save_top_k=1,
+        save_top_k=2,
         mode="min",
     )
     csv_logger = CSVLogger(
