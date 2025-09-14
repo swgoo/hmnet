@@ -1,0 +1,24 @@
+arch_layout: ["m4", ["T1m4", ["T8",["T11"],"T8"], "m4T1"], "m4"]
+d_model: [1024, 1536, 2048, 2048]
+d_intermediate: [0, 4096, 5504, 5504]
+vocab_size: 256
+n_chunk_select: [16, 16, 16]
+encoder_ssm_cfg: 
+    chunk_size: 256
+    d_conv: 4
+    d_state: 128
+    expand: 2
+decoder_ssm_cfg: 
+    chunk_size: 256
+    d_conv: 4
+    d_state: 128
+    expand: 2
+encoder_attn_cfg: 
+    num_heads: [16, 16, 16, 16]
+    rotary_emb_dim: [32, 48, 64, 64]
+    window_size: [128, 128, 128, 128]
+decoder_attn_cfg: 
+    num_heads: [16, 16, 16, 16]
+    rotary_emb_dim: [32, 48, 64, 64]
+    window_size: [128, 128, 128, 128]
+tie_embeddings: false

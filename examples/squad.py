@@ -617,7 +617,7 @@ def train(
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss",
         dirpath="checkpoints",
-        filename=f"{model_type}-squad-{Path(model_config).stem}-{{epoch:02d}}-{{val_loss:.2f}}",
+        filename=f"{model_type}-squad-{Path(model_config).stem}-{{val_loss:.2f}}-{{epoch:02d}}",
         save_top_k=2,
         mode="min",
     )
@@ -625,7 +625,7 @@ def train(
     train_checkpoint_callback = ModelCheckpoint(
         monitor="train_loss",
         dirpath="checkpoints",
-        filename=f"{model_type}-squad-{Path(model_config).stem}-{{epoch:02d}}-{{train_loss:.2f}}",
+        filename=f"{model_type}-squad-{Path(model_config).stem}-{{train_loss:.2f}}-{{epoch:02d}}",
         save_top_k=2,
         mode="min",
     )
