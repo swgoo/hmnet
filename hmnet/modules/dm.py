@@ -126,6 +126,11 @@ class ChunkAttnScoreModule(nn.Module):
         )
         return attn_score * self.softmax_scale
 
+    def _apply_soft_mask(self, logits: Tensor, mask: Tensor, neg_value: float = -1e4):
+        mask_float = mask.to(dtype=logits.dtype)
+        inv_mask_float = 1.0 - mask_float
+        return logits + neg_value * inv_mask_float
+
     def forward(
         self,
         hidden_states: Tensor,
@@ -147,7 +152,7 @@ class ChunkAttnScoreModule(nn.Module):
         top_k = torch.topk(logits, k=num_top_k, dim=-1, sorted=False).indices
         top_mask = torch.zeros_like(logits, dtype=torch.bool)
         top_mask.scatter_(-1, top_k, True)
-        return logits.masked_fill(~top_mask, -1e9)
+        return self._apply_soft_mask(logits, top_mask)
 
     def step(self, hidden_states: Tensor, inference_params: ChunkAttnScoreState):
         if hidden_states.shape[0] > 0:

@@ -16,7 +16,7 @@ decoder_ssm_cfg:
 encoder_attn_cfg: 
     num_heads: [16, 16, 16, 16]
     rotary_emb_dim: [32, 48, 64, 64]
-    window_size: [128, 128, 128, 128]
+    window_size: [256, 256, 256, 256]
 decoder_attn_cfg: 
     num_heads: [16, 16, 16, 16]
     rotary_emb_dim: [32, 48, 64, 64]
