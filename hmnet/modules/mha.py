@@ -135,20 +135,21 @@ class CausalMaskMHA(nn.Module):
         batch_size: int,
         q_len: int,
         kv_len: int,
+        window_size: int,
     ):
 
         def mask_fn(b: Tensor, h: Tensor, q_idx: Tensor, kv_idx: Tensor) -> Tensor:
             if q_len == 1:
-                if self.window_size == -1:
+                if window_size == -1:
                     return torch.ones_like(kv_idx, dtype=torch.bool)
                 else:
-                    start_idx = max(0, kv_len - 1 - self.window_size)
+                    start_idx = max(0, kv_len - 1 - window_size)
                     return kv_idx >= start_idx
             else:
-                if self.window_size == -1:
+                if window_size == -1:
                     return q_idx >= kv_idx
                 else:
-                    return (q_idx >= kv_idx) & ((q_idx - kv_idx) <= self.window_size)
+                    return (q_idx >= kv_idx) & ((q_idx - kv_idx) <= window_size)
 
         return create_block_mask(
             mask_fn,
@@ -219,11 +220,19 @@ class CausalMaskMHA(nn.Module):
         if inference_params is not None:
             kv = self._update_kv_cache(kv, inference_params)
 
-        if block_mask is None:
+        if block_mask is None and score_mod is None:
             block_mask = self._create_window_causal_mask(
                 batch_size=q.shape[0],
                 q_len=q.shape[1],
                 kv_len=kv.shape[1],
+                window_size=self.window_size,
+            )
+        elif block_mask is None and score_mod is not None:
+            block_mask = self._create_window_causal_mask(
+                batch_size=q.shape[0],
+                q_len=q.shape[1],
+                kv_len=kv.shape[1],
+                window_size=-1,
             )
 
         context = self._attention(

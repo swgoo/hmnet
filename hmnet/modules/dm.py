@@ -145,15 +145,20 @@ class ChunkAttnScoreModule(nn.Module):
             inference_params.last_query = q[:, -1, :]
         logits = self._attention_logit(q, k)
         mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
+        logits.masked_fill_(~mask_2d, -1e9)
+        causal_mask = torch.ones_like(logits).tril().bool()
+        logits.masked_fill_(~causal_mask, -1e9)
         causal_without_window = torch.ones_like(logits).tril(-self.window_size).bool()
-        mask_2d = mask_2d & causal_without_window
-        logits = logits.masked_fill(~mask_2d, -1e9)
+        long_range_logits = logits.masked_fill(~causal_without_window, -1e9)
         num_top_k = min(logits.shape[-1], self.n_chunk_select)
-        top_k = torch.topk(logits, k=num_top_k, dim=-1, sorted=False).indices
-        top_mask = torch.zeros_like(logits, dtype=torch.bool)
-        top_mask.scatter_(-1, top_k, True)
+        top_k = torch.topk(long_range_logits, k=num_top_k, dim=-1, sorted=False).indices
+        causal_with_window = causal_mask & (~causal_without_window)
+
+        top_mask = torch.zeros_like(logits, dtype=torch.bool).scatter_(-1, top_k, True)
+        top_mask = (top_mask & causal_mask & mask_2d) | (causal_with_window & mask_2d)
         return self._apply_soft_mask(logits, top_mask)
 
+    # TODO
     def step(self, hidden_states: Tensor, inference_params: ChunkAttnScoreState):
         if hidden_states.shape[0] > 0:
             q, k = self._project(hidden_states)
@@ -322,7 +327,12 @@ class DeChunkAttnScoreLayer(nn.Module):
         )
 
     def _create_score_mod(self, mask_score):
-        return lambda score, b, h, q_idx, kv_idx: score * mask_score[b, q_idx, kv_idx]
+        inv_mask = (mask_score < self.threshold).float()
+
+        def score_fn(score, b, h, q_idx, kv_idx):
+            return score - 1e-9 * inv_mask[b, q_idx, kv_idx]
+
+        return score_fn
 
     def create_masks(self, mask_score: Tensor):
         if mask_score is None:
@@ -332,11 +342,6 @@ class DeChunkAttnScoreLayer(nn.Module):
             score_mod = None
         else:
             mask = mask_score > self.threshold
-            masking_confidence = torch.where(
-                mask_score > self.threshold, mask_score, 1 - mask_score
-            )
-            masking_confidence = ste_func(masking_confidence, threshold=self.threshold)
-            score_mod = self._create_score_mod(masking_confidence)
-
+            score_mod = self._create_score_mod(mask_score)
         block_mask = self._create_chunk_causal_window_mask(mask)
         return score_mod, block_mask

@@ -247,7 +247,7 @@ class HMNet(nn.Module):
             bpred_output.selected_probs,
         ).to(hidden_states.dtype)
 
-        score_mod, block_mask = self.dechunk_attn_score_layer(
+        score_mod, _ = self.dechunk_attn_score_layer(
             boundary_mask=bpred_output.boundary_mask,
             chunk_attn_score=chunk_attn_score,
             mask=mask,
@@ -260,7 +260,7 @@ class HMNet(nn.Module):
             max_seqlen=max_seqlen,
             mask=mask,
             inference_params=inference_params.decoder_state,
-            block_mask=block_mask,
+            block_mask=None,
             score_mod=score_mod,
             **mixer_kwargs,
         )
@@ -337,7 +337,7 @@ class HMNet(nn.Module):
             bpred_output.selected_probs,
         ).to(hidden_states.dtype)
 
-        score_mod, block_mask = self.dechunk_attn_score_layer.step(
+        _, block_mask = self.dechunk_attn_score_layer.step(
             boundary_mask=bpred_output.boundary_mask,
             chunk_attn_score=chunk_attn_score,
             inference_params=inference_params.dechunk_attn_score_state,
@@ -346,7 +346,7 @@ class HMNet(nn.Module):
             hidden_states,
             inference_params.decoder_state,
             block_mask=block_mask,
-            score_mod=score_mod,
+            score_mod=None,
         )
 
         hidden_states = hidden_states[..., :D]
