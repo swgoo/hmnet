@@ -1,0 +1,1 @@
+nohup python examples/squad.py train --model-path  > 23.log & tail -f 23.log
