@@ -158,7 +158,6 @@ class ChunkAttnScoreModule(nn.Module):
         top_mask = (top_mask & causal_mask & mask_2d) | (causal_with_window & mask_2d)
         return self._apply_soft_mask(logits, top_mask)
 
-    # TODO
     def step(self, hidden_states: Tensor, inference_params: ChunkAttnScoreState):
         if hidden_states.shape[0] > 0:
             q, k = self._project(hidden_states)
@@ -175,12 +174,18 @@ class ChunkAttnScoreModule(nn.Module):
         )
         if self.window_size > 0 and kv_len > self.window_size:
             causal_without_window[..., : -self.window_size] = False
-        mask = causal_without_window
-        logits = logits.masked_fill(~mask, -1e9)
+        long_range_logits = logits.masked_fill(~causal_without_window, -1e9)
+
+        sliding_window = torch.zeros_like(logits, dtype=torch.bool)
+        if self.window_size > 0:
+            sliding_window[..., -self.window_size :] = True
+        else:
+            sliding_window[..., :] = True
         num_top_k = min(kv_len, self.n_chunk_select)
-        top_k = torch.topk(logits, k=num_top_k, dim=-1, sorted=False).indices
+        top_k = torch.topk(long_range_logits, k=num_top_k, dim=-1, sorted=False).indices
         top_mask = torch.zeros_like(logits, dtype=torch.bool)
         top_mask.scatter_(-1, top_k, True)
+        top_mask = top_mask | sliding_window
         logits = logits.masked_fill(~top_mask, -1e9)
         return logits
 
