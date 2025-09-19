@@ -1,2 +1,2 @@
-python examples/squad.py predict configs/hmnet_3stage_XL_LW.yaml --ckpt-path checkpoints/HMNet-squad-hmnet_3stage_XL_LW-epoch=15-val_loss=0.21.ckpt &&\
-python examples/squad.py train configs/hmnet_3stage_XL_MW.yaml --model-path ckpts/hmnet_3stage_XL_from_2stage_XL.pt
+python examples/squad.py predict configs/hmnet_3stage_XL_128_32_0.yaml --ckpt-path checkpoints/HMNet-squad-hmnet_3stage_XL_128_32_0-val_loss\=0.22-epoch\=15.ckpt &&\
+python examples/squad.py predict configs/hmnet_3stage_XL_128_32_32.yaml --ckpt-path checkpoints/HMNet-squad-hmnet_3stage_XL_128_32_32-val_loss\=0.21-epoch\=05.ckpt jk
