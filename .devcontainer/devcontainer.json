@@ -4,9 +4,9 @@
 		"../docker-compose.yml"
 	],
 	"service": "dev",
-	"workspaceFolder": "/workspace/${localWorkspaceFolderBasename}",
+	"workspaceFolder": "/root/${localWorkspaceFolderBasename}",
 	"mounts": [
-		"source=${localWorkspaceFolder},target=/workspace/${localWorkspaceFolderBasename},type=bind"
+		"source=${localWorkspaceFolder},target=/root/${localWorkspaceFolderBasename},type=bind"
 	],
 	"shutdownAction": "stopCompose",
 	"extensions": [

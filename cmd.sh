@@ -1,1 +1,0 @@
-nohup python examples/squad.py train configs/hmnet_3stage_XL_128_32_0.yaml --ckpt-path checkpoints/HMNet-squad-hmnet_3stage_XL_128_32_0-train_loss\=0.17-epoch\=12.ckpt  > 13.log & tail -f 13.log 

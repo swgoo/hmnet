@@ -3,8 +3,6 @@ services:
     build:
       dockerfile: .dockerfile
     command: tail -f /dev/null
-    environment:
-      - PYTHONPATH=/workspace:${PYTHONPATH}
     deploy:
       resources:
         reservations:

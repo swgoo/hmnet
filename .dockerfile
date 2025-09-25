@@ -6,7 +6,7 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 RUN pip install -r requirements.txt
-RUN pip install git+https://github.com/goombalab/hnet.git --no-deps
+# RUN pip install git+https://github.com/goombalab/hnet.git --no-deps
 
 RUN cd /temp
 WORKDIR /workspace
